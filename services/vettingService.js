@@ -34,12 +34,6 @@ export async function getTokenMetadata(mintAddress) {
   }
 }
 
-/**
- * Performs a comprehensive check using the rugcheck.xyz API.
- * This corrected version accurately parses the real API response.
- * @param {string} mintAddress The token mint address.
- * @returns {Promise<object|null>} A summary report or null if vetting fails.
- */
 export async function checkRug(mintAddress) {
   await logEvent("INFO", `Checking full report for token: ${mintAddress}`);
   try {
@@ -49,54 +43,44 @@ export async function checkRug(mintAddress) {
     if (response.data) {
       const report = response.data;
 
-      const lpInfo = report.markets?.[0]?.lp;
-      if (!lpInfo || lpInfo.lpLockedPct < 100) {
+      if (report.markets?.[0]?.lp?.lpLockedPct < 100) {
         await logEvent("WARN", `Vetting failed: LP not 100% locked.`, {
           mint: mintAddress,
-          lockedPct: lpInfo?.lpLockedPct || 0,
+          lockedPct: report.markets?.[0]?.lp?.lpLockedPct || 0,
         });
         return null;
       }
-
       if (report.tokenMeta?.mutable === true) {
         await logEvent("WARN", `Vetting failed: Metadata is mutable.`, {
           mint: mintAddress,
         });
         return null;
       }
-
       if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
         });
         return null;
       }
-
       if (report.token?.mintAuthority) {
         await logEvent("WARN", `Vetting failed: Token is mintable.`, {
           mint: mintAddress,
         });
         return null;
       }
-
-      const top10Holders = report.topHolders?.slice(0, 10) || [];
-      const top10Percentage = top10Holders.reduce(
-        (sum, holder) => sum + holder.pct,
-        0
-      );
-
+      const top10Percentage = (report.topHolders || [])
+        .slice(0, 10)
+        .reduce((sum, h) => sum + h.pct, 0);
       if (top10Percentage > MAX_HOLDER_CONCENTRATION_PERCENT) {
         await logEvent(
           "WARN",
           `Vetting failed: Top 10 holders own > ${MAX_HOLDER_CONCENTRATION_PERCENT}%.`,
-          {
-            mint: mintAddress,
-            concentration: `${top10Percentage.toFixed(2)}%`,
-          }
+          { mint: mintAddress, concentration: `${top10Percentage.toFixed(2)}%` }
         );
         return null;
       }
 
+      // Synthesize a summary object for the Gemini prompt
       let overallRiskLevel = "GOOD";
       if (report.risks && report.risks.length > 0) {
         const riskLevels = report.risks.map((r) => r.level.toUpperCase());
@@ -104,20 +88,18 @@ export async function checkRug(mintAddress) {
         else if (riskLevels.includes("WARN")) overallRiskLevel = "WARNING";
       }
 
-      const summary = {
+      const summaryForPrompt = {
+        score: report.score_normalised,
+        risks: report.risks || [],
         risk: { level: overallRiskLevel },
-        top10HolderConcentration: top10Percentage,
       };
 
       await logEvent(
         "SUCCESS",
         `RugCheck report received and passed all checks.`,
-        {
-          mint: mintAddress,
-          risk: summary.risk.level,
-        }
+        { mint: mintAddress, risk: summaryForPrompt.risk.level }
       );
-      return summary;
+      return summaryForPrompt;
     }
     return null;
   } catch (error) {

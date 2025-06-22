@@ -15,7 +15,7 @@ export async function shouldBuyToken(tokenInfo, rugCheckReport) {
           rugCheckReport.risk.level
         }" (Levels: GOOD, WARNING, DANGER)
         - RugCheck Top Risk Factor: "${rugCheckReport.risks[0]?.name || "None"}"
-        - RugCheck Score: ${rugCheckReport.score} / 1000
+        - RugCheck Score: ${rugCheckReport.score} / 100
         My trading strategy is to invest a small amount ($5) into any coin that seems to have viral potential, even with a 'WARNING' or 'DANGER' risk, as I have different profit-taking strategies for each risk level.
         Based on the token's name and symbol, does this have meme potential? Ignore the risk report for this decision, as I am already aware of it.
         Respond with ONLY one word: 'BUY' or 'PASS'.
