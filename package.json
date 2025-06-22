@@ -21,6 +21,7 @@
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
     "reconnecting-websocket": "^4.4.0",
-    "ws": "^8.17.1"
+    "ws": "^8.17.1",
+    "express": "^4.19.2"
   }
 }
