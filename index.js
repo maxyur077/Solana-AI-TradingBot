@@ -21,6 +21,9 @@ import {
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
 import chalk from "chalk";
+import express from "express"; // Import express
+
+const app = express();
 
 const seenSignatures = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
@@ -28,7 +31,7 @@ const connection = new Connection(RPC_URL, "confirmed");
 async function processNewLiquidityPool(transaction) {
   try {
     if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
-      return;
+      return; // Quietly skip if portfolio is full
     }
 
     if (!transaction || !transaction.meta) return;
@@ -126,6 +129,26 @@ async function monitorNewPools() {
   );
 }
 
+function startHealthCheckServer() {
+  app.get("/health", (req, res) => {
+    // You can add more sophisticated health checks here,
+    // e.g., check database connection, RPC connection, etc.
+    res.status(200).send("OK");
+  });
+
+  app.listen(HEALTH_CHECK_PORT, () => {
+    console.log(
+      chalk.bold.cyan(
+        `Health check server listening on port ${HEALTH_CHECK_PORT}`
+      )
+    );
+    logEvent(
+      "INFO",
+      `Health check server started on port ${HEALTH_CHECK_PORT}`
+    );
+  });
+}
+
 async function main() {
   await initDb();
   await loadBlacklist();
@@ -144,6 +167,7 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
+  startHealthCheckServer();
 
   monitorNewPools();
   setInterval(() => {

@@ -78,10 +78,9 @@ export async function getSolPriceUsd() {
     }
     throw new Error("Invalid response from price API");
   } catch (error) {
-    // Assuming logEvent is defined elsewhere in your project
     await logEvent("ERROR", "Failed to fetch SOL price in USD", {
       error: error.message,
     });
-    return 0; // Return 0 as a safe fallback
+    return 0;
   }
 }

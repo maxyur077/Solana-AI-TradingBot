@@ -90,7 +90,7 @@ export const TAKE_PROFIT_GOOD_TIERS = {
     SELL_PERCENT: parseFloat(loadEnvVariable("GOOD_TP_3_SELL_PERCENT")),
   },
 };
-
+export const HEALTH_CHECK_PORT = process.env.HEALTH_CHECK_PORT || 3000; // Or any port you prefer
 // Static Solana Addresses
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const RAYDIUM_LIQUIDITY_POOL_V4 =
