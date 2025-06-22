@@ -19,6 +19,8 @@
     "dotenv": "^16.4.5",
     "fast-levenshtein": "^3.0.0",
     "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "reconnecting-websocket": "^4.4.0",
+    "ws": "^8.17.1"
   }
 }
