@@ -6,6 +6,7 @@ import {
   MIN_LIQUIDITY_SOL,
   MAX_PORTFOLIO_SIZE,
   SOL_MINT,
+  HEALTH_CHECK_PORT,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
 import {
