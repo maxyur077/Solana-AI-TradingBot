@@ -1,94 +1,120 @@
 Advanced Solana AI Trading Bot
-Welcome! This is a professional-grade, automated trading bot for sniping new meme coins on the Solana blockchain, developed by software developer and crypto enthusiast Mayur Maskar.
 
-This bot leverages AI-powered analysis, sophisticated risk management, and dynamic trading strategies to navigate the fast-paced world of meme coin trading with the goal of maximizing profit while mitigating risk.
+A professional-grade, automated trading bot for sniping new meme coins on the Solana blockchain, developed by software developer and crypto enthusiast Mayur Maskar.
 
-🚀 Key Features
-AI-Powered Decisions: Uses the Google Gemini API to analyze token names and symbols for viral potential, providing an intelligent layer beyond simple metrics.
+🚀 Table of Contents
 
-Dynamic, Risk-Adjusted Trading: Automatically adjusts its strategy based on a token's risk profile from rugcheck.xyz.
+Key Features
 
-Variable Trade Sizing: Places smaller bets on high-risk (DANGER) tokens and larger bets on more promising (GOOD) tokens.
+Prerequisites
 
-Custom Take-Profit & Stop-Loss: Applies different, fully configurable take-profit and stop-loss rules for each risk level.
+Installation & Setup
 
-Advanced Pre-Trade Vetting: Before spending any SOL, the bot performs critical safety checks:
+Configuration
 
-Liquidity Threshold: Ignores tokens with insufficient initial liquidity.
+Running the Bot
 
-Mandatory Security Checks: Automatically rejects tokens if liquidity isn't 100% locked or if the mint/freeze authority has not been renounced.
+Safety & Security
 
-Holder Analysis: Rejects tokens with dangerously high holder concentration.
+Support & Tips
+
+License
+
+🔑 Key Features
+
+AI-Powered Decisions: Integrates with Google Gemini API to analyze token names and symbols for viral potential.
+
+Dynamic, Risk-Adjusted Trading: Adjusts strategy based on a token's risk profile from rugcheck.xyz.
+
+Variable Trade Sizing: Smaller stakes on DANGER tokens, larger bets on GOOD tokens.
+
+Custom Take-Profit & Stop-Loss: Fully configurable rules per risk level.
+
+Advanced Pre-Trade Vetting:
+
+Liquidity threshold checks
+
+100% locked liquidity requirement
+
+Renounced mint/freeze authority verification
+
+Holder concentration analysis
 
 Intelligent Profit Protection:
 
-Trailing Stop-Loss: Locks in gains by automatically selling a position if it drops a certain percentage from its peak price.
+Trailing stop-loss
 
-Time-Based Selling: Automatically sells profitable but risky (DANGER) tokens after a configurable time limit to avoid "stale" trades.
+Time-based auto-sell for stale trades
 
 Robust & Reliable:
 
-Automatic Retries: If a transaction fails due to network congestion or slippage, the bot automatically retries.
+Automatic retries on failures
 
-Priority Fees: Uses Jupiter's auto priority fee settings to ensure transactions are processed quickly and reliably.
+Priority fee management via Jupiter API
 
-No Re-Buys & Blacklist: Prevents buying the same token twice and allows you to maintain a blacklist.txt of tokens to ignore.
+Blacklist support to skip unwanted tokens
 
 Comprehensive Logging:
 
-Database Records: Logs every trade, fee, and system event to a local SQLite database.
+SQLite database for all trades and events
 
-Live Console Output: Provides real-time, color-coded logs in the console.
+Live, color-coded console output
 
-Total P&L Tracking: Calculates and displays your running total Profit/Loss in USD after every sell trade.
+Real-time profit & loss (P&L) tracking in USD
 
-🛠️ Setup Instructions
-Install Node.js: Ensure you have Node.js v18.0 or higher.
+🛠️ Prerequisites
 
-Clone & Install Dependencies:
+Node.js v18.0 or higher
 
-# Create a new directory for the bot
+Git for cloning the repository
 
-mkdir solana-ai-bot && cd solana-ai-bot
+API keys for Helius and Google Gemini
 
-# Initialize a Node.js project
+A Solana wallet private key (keep secure!)
 
-npm init -y
+📥 Installation & Setup
 
-# Install all required packages
+# Clone the repository
 
-npm install @solana/web3.js @solana/spl-token @jup-ag/api bs58 cross-fetch dotenv @google/generative-ai chalk axios sqlite3
+git clone https://github.com/your-username/solana-ai-bot.git
+cd solana-ai-bot
 
-Get API Keys & Private Key:
+# Initialize and install dependencies
 
-Helius API Key: Sign up at helius.xyz to get an RPC URL.
+npm install
 
-Gemini API Key: Create a key at Google AI Studio.
+⚙️ Configuration
 
-Solana Private Key: Export your wallet's private key from your wallet's settings. NEVER SHARE THIS KEY.
+Environment Variables: Rename \_env.example to .env and fill in the following keys:
 
-Configure Environment:
+HELIUS_API_KEY=your-helius-key
+GEMINI_API_KEY=your-gemini-key
+SOLANA_PRIVATE_KEY=your-base58-private-key
 
-Create a file named .env in the project root.
+# Strategy parameters (customize!)
 
-Copy the contents of \_env.example into it and fill in your keys and strategy parameters.
+RISK_GOOD=0.5
+RISK_DANGER=0.1
+TAKE_PROFIT_GOOD=1.2
+STOP_LOSS_DANGER=0.8
+...
 
-Create Blacklist (Optional):
+Blacklist (Optional): Create blacklist.txt in the project root and list any tokens (name or symbol) to ignore, one per line.
 
-Create a file named blacklist.txt in the root directory.
+▶️ Running the Bot
 
-Add any token names or symbols you wish to avoid, one per line.
-
-Run the Bot:
+# Start the trading bot
 
 node index.js
 
-⚠️ Disclaimer
-This trading bot is provided "as is" and for educational purposes. Cryptocurrency trading, especially with new and volatile meme coins, is inherently high-risk. The creators and contributors of this software are not responsible for any financial losses you may incur.
+The bot will perform all pre-trade checks, execute buys/sells, and log events to both console and SQLite database.
 
-You are solely responsible for managing your own risk, configuring the bot correctly, and complying with all applicable laws and regulations. Always do your own research (DYOR) and never invest more than you are willing to lose.
+🛡️ Safety & Security
 
-💖 Support the Project
-If you find this bot useful and wish to support its development, you can leave a tip by sending SOL to the following address:
+Never share your private key or .env file.
 
-D4cHq2xeb6RqSKydgkF6HHd4o57ZtD9nB5uKw1dp2htM
+This bot is provided as-is for educational purposes. Trading meme coins is high-risk.
+
+Always run on a test wallet before committing significant funds.
+
+Comply with all applicable regulations in your jurisdiction.
