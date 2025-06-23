@@ -74,6 +74,7 @@ async function processNewLiquidityPool(transaction) {
     const rugCheckReport = await checkRug(newMint);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
+      return;
     }
 
     const decision = await shouldBuyToken(metadata, rugCheckReport);
