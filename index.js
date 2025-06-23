@@ -3,9 +3,16 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
+  MAX_PORTFOLIO_SIZE,
+  SOL_MINT,
+  HEALTH_CHECK_PORT,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
-import { buyToken, monitorPortfolio } from "./services/tradeService.js";
+import {
+  buyToken,
+  monitorPortfolio,
+  getPortfolioSize,
+} from "./services/tradeService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
 import {
   initDb,
@@ -14,14 +21,16 @@ import {
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
 import chalk from "chalk";
+import express from "express";
 
+const app = express();
 const seenSignatures = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
 
 async function processNewLiquidityPool(transaction) {
   try {
     if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
-      return; // Quietly skip if portfolio is full
+      return;
     }
 
     if (
@@ -33,7 +42,7 @@ async function processNewLiquidityPool(transaction) {
     const postTokenBalances = transaction.meta.postTokenBalances;
     const newMintInfo = postTokenBalances.find(
       (tb) =>
-        tb.mint !== "So11111111111111111111111111111111111111112" &&
+        tb.mint !== SOL_MINT &&
         tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
     );
     if (!newMintInfo) return;
@@ -65,7 +74,6 @@ async function processNewLiquidityPool(transaction) {
     const rugCheckReport = await checkRug(newMint);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
-      return;
     }
 
     const decision = await shouldBuyToken(metadata, rugCheckReport);
@@ -130,6 +138,26 @@ async function monitorNewPools() {
   );
 }
 
+function startHealthCheckServer() {
+  app.get("/health", (req, res) => {
+    // You can add more sophisticated health checks here,
+    // e.g., check database connection, RPC connection, etc.
+    res.status(200).send("OK");
+  });
+
+  app.listen(HEALTH_CHECK_PORT, () => {
+    console.log(
+      chalk.bold.cyan(
+        `Health check server listening on port ${HEALTH_CHECK_PORT}`
+      )
+    );
+    logEvent(
+      "INFO",
+      `Health check server started on port ${HEALTH_CHECK_PORT}`
+    );
+  });
+}
+
 async function main() {
   await initDb();
   await loadBlacklist();
@@ -148,7 +176,7 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
-
+  startHealthCheckServer();
   startConsoleTimer();
   monitorNewPools();
   setInterval(() => {
