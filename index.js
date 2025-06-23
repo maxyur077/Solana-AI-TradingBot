@@ -3,17 +3,9 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
-  MIN_LIQUIDITY_SOL,
-  MAX_PORTFOLIO_SIZE,
-  SOL_MINT,
-  HEALTH_CHECK_PORT,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
-import {
-  buyToken,
-  monitorPortfolio,
-  getPortfolioSize,
-} from "./services/tradeService.js";
+import { buyToken, monitorPortfolio } from "./services/tradeService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
 import {
   initDb,
@@ -22,9 +14,6 @@ import {
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
 import chalk from "chalk";
-import express from "express"; // Import express
-
-const app = express();
 
 const seenSignatures = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
@@ -35,23 +24,16 @@ async function processNewLiquidityPool(transaction) {
       return; // Quietly skip if portfolio is full
     }
 
-    if (!transaction || !transaction.meta) return;
-
-    const quoteTokenBalanceChange = transaction.meta.postTokenBalances.find(
-      (tb) =>
-        tb.mint === SOL_MINT &&
-        tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
-    );
-    const initialLiquiditySol = quoteTokenBalanceChange
-      ? quoteTokenBalanceChange.uiTokenAmount.uiAmount
-      : 0;
-    if (initialLiquiditySol < MIN_LIQUIDITY_SOL) {
+    if (
+      !transaction ||
+      !transaction.meta ||
+      !transaction.meta.postTokenBalances
+    )
       return;
-    }
-
-    const newMintInfo = transaction.meta.postTokenBalances.find(
+    const postTokenBalances = transaction.meta.postTokenBalances;
+    const newMintInfo = postTokenBalances.find(
       (tb) =>
-        tb.mint !== SOL_MINT &&
+        tb.mint !== "So11111111111111111111111111111111111111112" &&
         tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
     );
     if (!newMintInfo) return;
@@ -60,7 +42,13 @@ async function processNewLiquidityPool(transaction) {
     if (await hasBeenPurchased(newMint)) return;
 
     const metadata = await getTokenMetadata(newMint);
-    if (!metadata) return;
+    if (!metadata) {
+      await logEvent(
+        "WARN",
+        `Could not fetch metadata for ${newMint}. Skipping.`
+      );
+      return;
+    }
 
     if (isBlacklisted(metadata.name, metadata.symbol)) {
       await logEvent(
@@ -72,10 +60,8 @@ async function processNewLiquidityPool(transaction) {
 
     await logEvent(
       "INFO",
-      `New token passed liquidity check: ${metadata.name} (${metadata.symbol})`,
-      { initialLiquiditySol }
+      `New token found: ${metadata.name} (${metadata.symbol}) | Mint: ${newMint}`
     );
-
     const rugCheckReport = await checkRug(newMint);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
@@ -92,11 +78,24 @@ async function processNewLiquidityPool(transaction) {
       );
     }
   } catch (error) {
-    await logEvent("ERROR", "Error processing new pool signature:", {
-      error: error.message,
-      stack: error.stack,
-    });
+    await logEvent("ERROR", "Error processing new pool signature:", { error });
   }
+}
+
+function startConsoleTimer() {
+  let countdown = 60;
+  setInterval(() => {
+    const seconds = countdown % 60;
+    process.stdout.write(
+      chalk.yellow(
+        `Monitoring for new pools... Next portfolio check in ${seconds
+          .toString()
+          .padStart(2, "0")}s \r`
+      )
+    );
+    countdown--;
+    if (countdown < 0) countdown = 60;
+  }, 1000);
 }
 
 async function monitorNewPools() {
@@ -107,6 +106,7 @@ async function monitorNewPools() {
   connection.onLogs(
     new PublicKey(RAYDIUM_LIQUIDITY_POOL_V4),
     async ({ logs, signature }) => {
+      process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
       if (
         seenSignatures.has(signature) ||
         !logs.some((log) => log.includes("initialize2"))
@@ -130,26 +130,6 @@ async function monitorNewPools() {
   );
 }
 
-function startHealthCheckServer() {
-  app.get("/health", (req, res) => {
-    // You can add more sophisticated health checks here,
-    // e.g., check database connection, RPC connection, etc.
-    res.status(200).send("OK");
-  });
-
-  app.listen(HEALTH_CHECK_PORT, () => {
-    console.log(
-      chalk.bold.cyan(
-        `Health check server listening on port ${HEALTH_CHECK_PORT}`
-      )
-    );
-    logEvent(
-      "INFO",
-      `Health check server started on port ${HEALTH_CHECK_PORT}`
-    );
-  });
-}
-
 async function main() {
   await initDb();
   await loadBlacklist();
@@ -168,10 +148,11 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
-  startHealthCheckServer();
 
+  startConsoleTimer();
   monitorNewPools();
   setInterval(() => {
+    process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
     logEvent("INFO", "Performing scheduled portfolio check...");
     monitorPortfolio();
   }, 60000); // Check every 1 minute
