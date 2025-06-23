@@ -36,8 +36,9 @@ This bot leverages AI-powered analysis, sophisticated risk management, and dynam
 
 
 ## Demo
+https://github.com/user-attachments/assets/7408831d-59ed-4448-8422-82a980fe4c2c
 
-[![Everything Is AWESOME](https://i.sstatic.net/q3ceS.png)](https://youtu.be/GR2AnFH_8HU)
+
 
 ## 🛠️ Setup Instructions
 
@@ -68,6 +69,7 @@ npm init
 node index.js
 ```
 ## ⚠️ Disclaimer
+
 
 This trading bot is provided "as is" and for educational purposes. Cryptocurrency trading, especially with new and volatile meme coins, is inherently high-risk. The creators and contributors of this software are not responsible for any financial losses you may incur.
 
