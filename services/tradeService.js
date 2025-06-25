@@ -19,7 +19,7 @@ import {
   TAKE_PROFIT_PERCENT_WARNING,
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
-  MAX_PORTFOLIO_SIZE,
+  GLOBAL_STOP_LOSS_USD,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -193,6 +193,16 @@ export async function sellToken(mintAddress, sellPercentage) {
         const profitInSol = receivedSol - initialInvestment;
         const solPrice = await getSolPriceUsd();
         if (solPrice > 0) totalPnlUsd += profitInSol * solPrice;
+
+        // Global Stop-Loss Check
+        if (totalPnlUsd <= GLOBAL_STOP_LOSS_USD) {
+          await logEvent(
+            "ERROR",
+            "GLOBAL STOP-LOSS TRIGGERED! Shutting down bot.",
+            { totalPnlUsd }
+          );
+          process.exit(1); // Exit bot immediately
+        }
 
         await logTrade(
           "SELL",

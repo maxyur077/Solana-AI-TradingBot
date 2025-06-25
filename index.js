@@ -3,9 +3,11 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
+  MIN_LIQUIDITY_SOL,
   MAX_PORTFOLIO_SIZE,
   SOL_MINT,
   HEALTH_CHECK_PORT,
+  VETTING_DELAY_MS,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
 import {
@@ -20,42 +22,40 @@ import {
   hasBeenPurchased,
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
+import {
+  monitorBitQuery,
+  bitqueryEmitter,
+} from "./services/bitqueryService.js";
 import chalk from "chalk";
 import express from "express";
+import { Mutex } from "async-mutex";
 
 const app = express();
 const seenSignatures = new Set();
+const seenMints = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
+const processingMutex = new Mutex();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function processNewLiquidityPool(transaction) {
+async function processNewToken(tokenData) {
+  const release = await processingMutex.acquire();
   try {
     if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
       return;
     }
 
-    if (
-      !transaction ||
-      !transaction.meta ||
-      !transaction.meta.postTokenBalances
-    )
+    const { mint, source, initialLiquiditySol } = tokenData;
+
+    if (await hasBeenPurchased(mint)) {
       return;
-    const postTokenBalances = transaction.meta.postTokenBalances;
-    const newMintInfo = postTokenBalances.find(
-      (tb) =>
-        tb.mint !== SOL_MINT &&
-        tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
-    );
-    if (!newMintInfo) return;
-    const newMint = newMintInfo.mint;
+    }
 
-    if (await hasBeenPurchased(newMint)) return;
+    await logEvent("INFO", `Vetting delay for ${mint}...`);
+    await sleep(VETTING_DELAY_MS);
 
-    const metadata = await getTokenMetadata(newMint);
+    const metadata = await getTokenMetadata(mint);
     if (!metadata) {
-      await logEvent(
-        "WARN",
-        `Could not fetch metadata for ${newMint}. Skipping.`
-      );
+      await logEvent("WARN", `Could not fetch metadata for ${mint}. Skipping.`);
       return;
     }
 
@@ -69,17 +69,19 @@ async function processNewLiquidityPool(transaction) {
 
     await logEvent(
       "INFO",
-      `New token found: ${metadata.name} (${metadata.symbol}) | Mint: ${newMint}`
+      `Vetting token from ${source}: ${metadata.name} (${metadata.symbol})`,
+      { initialLiquiditySol }
     );
-    const rugCheckReport = await checkRug(newMint);
+
+    const rugCheckReport = await checkRug(mint);
     if (!rugCheckReport) {
-      await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
+      await logEvent("WARN", `Vetting failed for ${mint}. Skipping.`);
       return;
     }
 
     const decision = await shouldBuyToken(metadata, rugCheckReport);
     if (decision) {
-      await buyToken(newMint, rugCheckReport.risk.level);
+      await buyToken(mint, rugCheckReport.risk.level);
     } else {
       await logEvent(
         "INFO",
@@ -87,11 +89,17 @@ async function processNewLiquidityPool(transaction) {
       );
     }
   } catch (error) {
-    await logEvent("ERROR", "Error processing new pool signature:", { error });
+    await logEvent("ERROR", "Error processing new token:", {
+      tokenData,
+      error: error.message,
+      stack: error.stack,
+    });
+  } finally {
+    release();
   }
 }
 
-async function monitorNewPools() {
+async function monitorRaydiumPools() {
   await logEvent(
     "INFO",
     "Starting real-time log monitoring for new Raydium liquidity pools..."
@@ -99,24 +107,49 @@ async function monitorNewPools() {
   connection.onLogs(
     new PublicKey(RAYDIUM_LIQUIDITY_POOL_V4),
     async ({ logs, signature }) => {
-      process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
       if (
         seenSignatures.has(signature) ||
         !logs.some((log) => log.includes("initialize2"))
       )
         return;
       seenSignatures.add(signature);
+
       try {
         const tx = await connection.getParsedTransaction(signature, {
           maxSupportedTransactionVersion: 0,
           commitment: "confirmed",
         });
-        await processNewLiquidityPool(tx);
+        if (!tx || !tx.meta) return;
+
+        const quoteTokenBalanceChange = tx.meta.postTokenBalances.find(
+          (tb) =>
+            tb.mint === SOL_MINT &&
+            tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+        );
+        const initialLiquiditySol = quoteTokenBalanceChange
+          ? quoteTokenBalanceChange.uiTokenAmount.uiAmount
+          : 0;
+        if (initialLiquiditySol < MIN_LIQUIDITY_SOL) return;
+
+        const newMintInfo = tx.meta.postTokenBalances.find(
+          (tb) =>
+            tb.mint !== SOL_MINT &&
+            tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+        );
+        if (newMintInfo && !seenMints.has(newMintInfo.mint)) {
+          seenMints.add(newMintInfo.mint);
+          processNewToken({
+            mint: newMintInfo.mint,
+            source: "Raydium",
+            initialLiquiditySol,
+          });
+        }
       } catch (error) {
-        await logEvent("ERROR", "Failed to get parsed transaction", {
-          signature,
-          error,
-        });
+        await logEvent(
+          "ERROR",
+          "Failed to get parsed transaction for Raydium",
+          { signature, error }
+        );
       }
     },
     "confirmed"
@@ -125,17 +158,9 @@ async function monitorNewPools() {
 
 function startHealthCheckServer() {
   app.get("/health", (req, res) => {
-    // You can add more sophisticated health checks here,
-    // e.g., check database connection, RPC connection, etc.
     res.status(200).send("OK");
   });
-
   app.listen(HEALTH_CHECK_PORT, () => {
-    console.log(
-      chalk.bold.cyan(
-        `Health check server listening on port ${HEALTH_CHECK_PORT}`
-      )
-    );
     logEvent(
       "INFO",
       `Health check server started on port ${HEALTH_CHECK_PORT}`
@@ -161,13 +186,46 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
+
   startHealthCheckServer();
-  monitorNewPools();
+  monitorRaydiumPools();
+  monitorBitQuery();
+
+  let isAcceptingNewTokens = true;
+
+  // Main loop to control token acceptance
   setInterval(() => {
-    process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
+    if (getPortfolioSize() > 0) {
+      if (isAcceptingNewTokens) {
+        logEvent(
+          "WARN",
+          "Portfolio is active. Pausing detection of new tokens."
+        );
+        isAcceptingNewTokens = false;
+      }
+    } else {
+      if (!isAcceptingNewTokens) {
+        logEvent(
+          "SUCCESS",
+          "Portfolio is empty. Resuming detection of new tokens."
+        );
+        isAcceptingNewTokens = true;
+      }
+    }
+  }, 5000); // Check every 5 seconds
+
+  bitqueryEmitter.on("newToken", (tokenData) => {
+    if (!isAcceptingNewTokens || seenMints.has(tokenData.mint)) {
+      return;
+    }
+    seenMints.add(tokenData.mint);
+    processNewToken(tokenData);
+  });
+
+  setInterval(() => {
     logEvent("INFO", "Performing scheduled portfolio check...");
     monitorPortfolio();
-  }, 60000); // Check every 1 minute
+  }, 60000);
 }
 
 main();

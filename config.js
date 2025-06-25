@@ -18,6 +18,7 @@ function loadEnvVariable(key, isSecret = false) {
 
 // API and Wallet Keys
 export const GEMINI_API_KEY = loadEnvVariable("GEMINI_API_KEY", true);
+export const BITQUERY_API_KEY = loadEnvVariable("BITQUERY_API_KEY", true);
 export const RPC_URL = loadEnvVariable("RPC_URL");
 const privateKeyStr = loadEnvVariable("PRIVATE_KEY", true);
 let walletKeypair;
@@ -38,10 +39,21 @@ export const MAX_PORTFOLIO_SIZE = parseInt(
   loadEnvVariable("MAX_PORTFOLIO_SIZE"),
   10
 );
+export const HEALTH_CHECK_PORT = process.env.PORT || 3000;
+export const GLOBAL_STOP_LOSS_USD = parseFloat(
+  loadEnvVariable("GLOBAL_STOP_LOSS_USD")
+);
 
 // Vetting Strategy
+export const VETTING_DELAY_MS = parseInt(
+  loadEnvVariable("VETTING_DELAY_MS"),
+  10
+);
 export const MIN_LIQUIDITY_SOL = parseFloat(
   loadEnvVariable("MIN_LIQUIDITY_SOL")
+);
+export const MIN_LIQUIDITY_USD = parseFloat(
+  loadEnvVariable("MIN_LIQUIDITY_USD")
 );
 export const MAX_HOLDER_CONCENTRATION_PERCENT = parseFloat(
   loadEnvVariable("MAX_HOLDER_CONCENTRATION_PERCENT")
@@ -90,7 +102,7 @@ export const TAKE_PROFIT_GOOD_TIERS = {
     SELL_PERCENT: parseFloat(loadEnvVariable("GOOD_TP_3_SELL_PERCENT")),
   },
 };
-export const HEALTH_CHECK_PORT = process.env.PORT || 3000; // Or any port you prefer
+
 // Static Solana Addresses
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const RAYDIUM_LIQUIDITY_POOL_V4 =

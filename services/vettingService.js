@@ -1,6 +1,10 @@
 import axios from "axios";
 import { logEvent } from "./databaseService.js";
-import { RPC_URL, MAX_HOLDER_CONCENTRATION_PERCENT } from "../config.js";
+import {
+  RPC_URL,
+  MAX_HOLDER_CONCENTRATION_PERCENT,
+  MIN_LIQUIDITY_USD,
+} from "../config.js";
 import fetch from "cross-fetch";
 
 export async function getTokenMetadata(mintAddress) {
@@ -42,6 +46,8 @@ export async function checkRug(mintAddress) {
 
     if (response.data) {
       const report = response.data;
+
+      // Critical Vetting Rules
       if (report.markets?.[0]?.lp?.lpLockedPct < 100) {
         await logEvent("WARN", `Vetting failed: LP not 100% locked.`, {
           mint: mintAddress,
@@ -55,7 +61,6 @@ export async function checkRug(mintAddress) {
         });
         return null;
       }
-
       if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
@@ -68,6 +73,7 @@ export async function checkRug(mintAddress) {
         });
         return null;
       }
+
       const top10Percentage = (report.topHolders || [])
         .slice(0, 10)
         .reduce((sum, h) => sum + h.pct, 0);
@@ -79,13 +85,27 @@ export async function checkRug(mintAddress) {
         );
         return null;
       }
+      if (
+        !report.fileMeta?.website &&
+        !report.fileMeta?.twitter &&
+        !report.fileMeta?.telegram
+      ) {
+        await logEvent("WARN", `Vetting failed: No social links found.`, {
+          mint: mintAddress,
+        });
+        return null;
+      }
 
-      // Synthesize a summary object for the Gemini prompt
-      let overallRiskLevel = "GOOD";
+      let overallRiskLevel = "DANGER"; // Default to DANGER for safety
       if (report.risks && report.risks.length > 0) {
         const riskLevels = report.risks.map((r) => r.level.toUpperCase());
-        if (riskLevels.includes("DANGER")) overallRiskLevel = "DANGER";
-        else if (riskLevels.includes("WARN")) overallRiskLevel = "WARNING";
+        if (riskLevels.includes("DANGER")) {
+          overallRiskLevel = "DANGER";
+        } else if (riskLevels.includes("WARN")) {
+          overallRiskLevel = "WARNING";
+        } else {
+          overallRiskLevel = "GOOD";
+        }
       }
 
       const summaryForPrompt = {

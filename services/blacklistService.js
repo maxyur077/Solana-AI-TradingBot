@@ -29,8 +29,9 @@ export async function loadBlacklist() {
 }
 
 export function isBlacklisted(name, symbol) {
-  const lowerName = name.toLowerCase();
-  const lowerSymbol = symbol.toLowerCase();
+  const lowerName = (name || "").toLowerCase();
+  const lowerSymbol = (symbol || "").toLowerCase();
+
   for (const term of blacklist) {
     if (lowerName.includes(term) || lowerSymbol.includes(term)) {
       return true;
