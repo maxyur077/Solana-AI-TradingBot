@@ -3,16 +3,9 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
-  MIN_LIQUIDITY_SOL,
-  MAX_PORTFOLIO_SIZE,
-  SOL_MINT,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
-import {
-  buyToken,
-  monitorPortfolio,
-  getPortfolioSize,
-} from "./services/tradeService.js";
+import { buyToken, monitorPortfolio } from "./services/tradeService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
 import {
   initDb,
@@ -27,29 +20,16 @@ const connection = new Connection(RPC_URL, "confirmed");
 
 async function processNewLiquidityPool(transaction) {
   try {
-    if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
-      await logEvent(
-        "INFO",
-        `Portfolio is full (${getPortfolioSize()}/${MAX_PORTFOLIO_SIZE}). Skipping new pools.`
-      );
+    if (
+      !transaction ||
+      !transaction.meta ||
+      !transaction.meta.postTokenBalances
+    )
       return;
-    }
-
-    if (!transaction || !transaction.meta) return;
-
-    const quoteTokenBalanceChange = transaction.meta.postTokenBalances.find(
+    const postTokenBalances = transaction.meta.postTokenBalances;
+    const newMintInfo = postTokenBalances.find(
       (tb) =>
-        tb.mint === SOL_MINT &&
-        tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
-    );
-    const initialLiquiditySol = quoteTokenBalanceChange
-      ? quoteTokenBalanceChange.uiTokenAmount.uiAmount
-      : 0;
-    if (initialLiquiditySol < MIN_LIQUIDITY_SOL) return;
-
-    const newMintInfo = transaction.meta.postTokenBalances.find(
-      (tb) =>
-        tb.mint !== SOL_MINT &&
+        tb.mint !== "So11111111111111111111111111111111111111112" &&
         tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
     );
     if (!newMintInfo) return;
@@ -58,7 +38,13 @@ async function processNewLiquidityPool(transaction) {
     if (await hasBeenPurchased(newMint)) return;
 
     const metadata = await getTokenMetadata(newMint);
-    if (!metadata) return;
+    if (!metadata) {
+      await logEvent(
+        "WARN",
+        `Could not fetch metadata for ${newMint}. Skipping.`
+      );
+      return;
+    }
 
     if (isBlacklisted(metadata.name, metadata.symbol)) {
       await logEvent(
@@ -70,10 +56,8 @@ async function processNewLiquidityPool(transaction) {
 
     await logEvent(
       "INFO",
-      `New token passed liquidity check: ${metadata.name} (${metadata.symbol})`,
-      { initialLiquiditySol }
+      `New token found: ${metadata.name} (${metadata.symbol}) | Mint: ${newMint}`
     );
-
     const rugCheckReport = await checkRug(newMint);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
@@ -118,13 +102,13 @@ async function monitorNewPools() {
   connection.onLogs(
     new PublicKey(RAYDIUM_LIQUIDITY_POOL_V4),
     async ({ logs, signature }) => {
+      process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
       if (
         seenSignatures.has(signature) ||
         !logs.some((log) => log.includes("initialize2"))
       )
         return;
       seenSignatures.add(signature);
-      process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
       try {
         const tx = await connection.getParsedTransaction(signature, {
           maxSupportedTransactionVersion: 0,

@@ -35,65 +35,78 @@ export async function getTokenMetadata(mintAddress) {
 }
 
 export async function checkRug(mintAddress) {
-  await logEvent("INFO", `Checking rug risk for token: ${mintAddress}`);
+  await logEvent("INFO", `Checking full report for token: ${mintAddress}`);
   try {
     const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report`;
     const response = await axios.get(url);
 
     if (response.data) {
       const report = response.data;
-      const summary = report.summary;
 
-      if (report.lp?.lockedPct < 1) {
-        await logEvent("WARN", `Vetting failed: LP not 100% locked.`, {
-          mint: mintAddress,
-          lockedPct: report.lp?.lockedPct,
-        });
-        return null;
-      }
-      if (
-        report.token.metadata?.updateAuthority &&
-        report.token.metadata.updateAuthority !==
-          "11111111111111111111111111111111"
-      ) {
+      if (report.tokenMeta?.mutable === true) {
         await logEvent("WARN", `Vetting failed: Metadata is mutable.`, {
           mint: mintAddress,
         });
         return null;
       }
-      if (report.token.mint?.freezeAuthority) {
+      if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
         });
         return null;
       }
-      if (report.token.mint?.mintAuthority) {
+      if (report.token?.mintAuthority) {
         await logEvent("WARN", `Vetting failed: Token is mintable.`, {
           mint: mintAddress,
         });
         return null;
       }
-      if (report.holders?.top10Pct > MAX_HOLDER_CONCENTRATION_PERCENT / 100) {
+      const top10Percentage = (report.topHolders || [])
+        .slice(0, 10)
+        .reduce((sum, h) => sum + h.pct, 0);
+      if (top10Percentage > MAX_HOLDER_CONCENTRATION_PERCENT) {
         await logEvent(
           "WARN",
           `Vetting failed: Top 10 holders own > ${MAX_HOLDER_CONCENTRATION_PERCENT}%.`,
-          { mint: mintAddress, concentration: report.holders.top10Pct }
+          { mint: mintAddress, concentration: `${top10Percentage.toFixed(2)}%` }
         );
         return null;
       }
-
-      let overallRiskLevel = "GOOD";
-      if (summary.risks && summary.risks.length > 0) {
-        const riskLevels = summary.risks.map((r) => r.level.toUpperCase());
-        if (riskLevels.includes("DANGER")) overallRiskLevel = "DANGER";
-        else if (riskLevels.includes("WARN")) overallRiskLevel = "WARNING";
+      if (
+        !report.fileMeta?.website &&
+        !report.fileMeta?.twitter &&
+        !report.fileMeta?.telegram
+      ) {
+        await logEvent("WARN", `Vetting failed: No social links found.`, {
+          mint: mintAddress,
+        });
+        return null;
       }
-      summary.risk = { level: overallRiskLevel };
-      await logEvent("SUCCESS", `RugCheck report received.`, {
-        mint: mintAddress,
-        risk: summary.risk.level,
-      });
-      return summary;
+
+      let overallRiskLevel = "DANGER"; // Default to DANGER for safety
+      if (report.risks && report.risks.length > 0) {
+        const riskLevels = report.risks.map((r) => r.level.toUpperCase());
+        if (riskLevels.includes("DANGER")) {
+          overallRiskLevel = "DANGER";
+        } else if (riskLevels.includes("WARN")) {
+          overallRiskLevel = "WARNING";
+        } else {
+          overallRiskLevel = "GOOD";
+        }
+      }
+
+      const summaryForPrompt = {
+        score: report.score_normalised,
+        risks: report.risks || [],
+        risk: { level: overallRiskLevel },
+      };
+
+      await logEvent(
+        "SUCCESS",
+        `RugCheck report received and passed all checks.`,
+        { mint: mintAddress, risk: summaryForPrompt.risk.level }
+      );
+      return summaryForPrompt;
     }
     return null;
   } catch (error) {
