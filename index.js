@@ -14,7 +14,9 @@ import {
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
 import chalk from "chalk";
+import express from "express";
 
+const app = express();
 const seenSignatures = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
 
@@ -125,6 +127,14 @@ async function monitorNewPools() {
     "confirmed"
   );
 }
+function startHealthCheckServer() {
+  app.get("/health", (req, res) => {
+    res.status(200).send("OK");
+  });
+  app.listen(process.env.PORT, () => {
+    logEvent("INFO", `Health check server started on port ${process.env.PORT}`);
+  });
+}
 
 async function main() {
   await initDb();
@@ -144,7 +154,7 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
-
+  startHealthCheckServer();
   startConsoleTimer();
   monitorNewPools();
   setInterval(() => {
