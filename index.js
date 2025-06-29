@@ -80,22 +80,6 @@ async function processNewLiquidityPool(transaction) {
   }
 }
 
-function startConsoleTimer() {
-  let countdown = 60;
-  setInterval(() => {
-    const seconds = countdown % 60;
-    process.stdout.write(
-      chalk.yellow(
-        `Monitoring for new pools... Next portfolio check in ${seconds
-          .toString()
-          .padStart(2, "0")}s \r`
-      )
-    );
-    countdown--;
-    if (countdown < 0) countdown = 60;
-  }, 1000);
-}
-
 async function monitorNewPools() {
   await logEvent(
     "INFO",
@@ -155,7 +139,6 @@ async function main() {
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
   startHealthCheckServer();
-  startConsoleTimer();
   monitorNewPools();
   setInterval(() => {
     process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
