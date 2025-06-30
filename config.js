@@ -65,8 +65,18 @@ export const STALE_DANGER_COIN_MINUTES = parseInt(
   loadEnvVariable("STALE_DANGER_COIN_MINUTES"),
   10
 );
+export const MIN_LIQUIDITY_USD = parseFloat(
+  loadEnvVariable("MIN_LIQUIDITY_USD")
+);
+export const MIN_MARKET_CAP_USD = parseFloat(
+  loadEnvVariable("MIN_MARKET_CAP_USD")
+);
 export const DEEP_LOSS_PERCENT_DANGER = parseFloat(
   loadEnvVariable("DEEP_LOSS_PERCENT_DANGER")
+);
+
+export const GLOBAL_STOP_LOSS_USD = parseFloat(
+  loadEnvVariable("GLOBAL_STOP_LOSS_USD")
 );
 
 // Take Profit Strategies

@@ -114,7 +114,9 @@ export async function buyToken(mintAddress, riskLevel) {
     return false;
   }
 }
-
+export function getTotalPnlUsd() {
+  return totalPnlUsd;
+}
 export async function sellToken(mintAddress, sellPercentage) {
   const maxRetries = 3;
   const retryDelay = 5000;

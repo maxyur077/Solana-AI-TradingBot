@@ -1,6 +1,11 @@
 import axios from "axios";
 import { logEvent } from "./databaseService.js";
-import { RPC_URL, MAX_HOLDER_CONCENTRATION_PERCENT } from "../config.js";
+import {
+  RPC_URL,
+  MAX_HOLDER_CONCENTRATION_PERCENT,
+  MIN_LIQUIDITY_USD,
+  MIN_MARKET_CAP_USD,
+} from "../config.js";
 import fetch from "cross-fetch";
 
 export async function getTokenMetadata(mintAddress) {
@@ -43,6 +48,8 @@ export async function checkRug(mintAddress) {
     if (response.data) {
       const report = response.data;
 
+      // Critical Vetting Rules
+
       if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
@@ -55,9 +62,23 @@ export async function checkRug(mintAddress) {
         });
         return null;
       }
-      const top10Percentage = (report.topHolders || [])
-        .slice(0, 10)
-        .reduce((sum, h) => sum + h.pct, 0);
+      if (report.totalMarketLiquidity < MIN_LIQUIDITY_USD) {
+        await logEvent("WARN", `Vetting failed: Insufficient liquidity.`, {
+          mint: mintAddress,
+          liquidity: report.totalMarketLiquidity,
+        });
+        return null;
+      }
+
+      const marketCap =
+        report.price * (report.token.supply / 10 ** report.token.decimals);
+      if (marketCap < MIN_MARKET_CAP_USD) {
+        await logEvent("WARN", `Vetting failed: Market cap too low.`, {
+          mint: mintAddress,
+          marketCap,
+        });
+        return null;
+      }
 
       let overallRiskLevel = "DANGER"; // Default to DANGER for safety
       if (report.risks && report.risks.length > 0) {

@@ -3,9 +3,14 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
+  GLOBAL_STOP_LOSS_USD,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
-import { buyToken, monitorPortfolio } from "./services/tradeService.js";
+import {
+  buyToken,
+  monitorPortfolio,
+  getTotalPnlUsd,
+} from "./services/tradeService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
 import {
   initDb,
@@ -140,10 +145,19 @@ async function main() {
   );
   startHealthCheckServer();
   monitorNewPools();
-  setInterval(() => {
+  setInterval(async () => {
     process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
     logEvent("INFO", "Performing scheduled portfolio check...");
-    monitorPortfolio();
+    await monitorPortfolio();
+    const currentPnl = getTotalPnlUsd();
+    if (currentPnl <= GLOBAL_STOP_LOSS_USD) {
+      await logEvent(
+        "ERROR",
+        "GLOBAL STOP-LOSS TRIGGERED! Shutting down bot.",
+        { totalPnlUsd: currentPnl }
+      );
+      process.exit(1);
+    }
   }, 60000); // Check every 1 minute
 }
 
