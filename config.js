@@ -40,9 +40,6 @@ export const MAX_PORTFOLIO_SIZE = parseInt(
 );
 
 // Vetting Strategy
-export const MIN_LIQUIDITY_SOL = parseFloat(
-  loadEnvVariable("MIN_LIQUIDITY_SOL")
-);
 export const MAX_HOLDER_CONCENTRATION_PERCENT = parseFloat(
   loadEnvVariable("MAX_HOLDER_CONCENTRATION_PERCENT")
 );
