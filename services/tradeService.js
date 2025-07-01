@@ -19,7 +19,6 @@ import {
   TAKE_PROFIT_PERCENT_WARNING,
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
-  MAX_PORTFOLIO_SIZE,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -38,6 +37,10 @@ export function getPortfolioSize() {
   return portfolio.size;
 }
 
+export function getTotalPnlUsd() {
+  return totalPnlUsd;
+}
+
 export async function buyToken(mintAddress, riskLevel) {
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
   await logEvent(
@@ -53,6 +56,7 @@ export async function buyToken(mintAddress, riskLevel) {
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
+
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
         method: "POST",
@@ -66,6 +70,12 @@ export async function buyToken(mintAddress, riskLevel) {
         }),
       })
     ).json();
+
+    // FIX: Add defensive check for swapTransaction
+    if (!swapTransaction) {
+      throw new Error("Failed to get swap transaction from Jupiter API.");
+    }
+
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
 
@@ -114,9 +124,7 @@ export async function buyToken(mintAddress, riskLevel) {
     return false;
   }
 }
-export function getTotalPnlUsd() {
-  return totalPnlUsd;
-}
+
 export async function sellToken(mintAddress, sellPercentage) {
   const maxRetries = 3;
   const retryDelay = 5000;
