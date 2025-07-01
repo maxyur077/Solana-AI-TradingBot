@@ -407,7 +407,7 @@ export async function monitorPortfolio() {
       continue;
     }
 
-    if (pnlPercentage <= -10) {
+    if (pnlPercentage <= -5) {
       await logEvent(
         "WARN",
         `Stop loss triggered. Selling 100%.`,
