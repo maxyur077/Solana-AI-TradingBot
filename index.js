@@ -71,15 +71,7 @@ async function processNewLiquidityPool(transaction) {
       return;
     }
 
-    const decision = await shouldBuyToken(metadata, rugCheckReport);
-    if (decision) {
-      await buyToken(newMint, rugCheckReport.risk.level);
-    } else {
-      await logEvent(
-        "INFO",
-        `Decision: PASS on ${metadata.symbol} based on AI recommendation.`
-      );
-    }
+    await buyToken(newMint, rugCheckReport.risk.level);
   } catch (error) {
     await logEvent("ERROR", "Error processing new pool signature:", { error });
   }
