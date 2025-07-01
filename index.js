@@ -24,6 +24,7 @@ import express from "express";
 const app = express();
 const seenSignatures = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function processNewLiquidityPool(transaction) {
   try {
@@ -65,12 +66,13 @@ async function processNewLiquidityPool(transaction) {
       "INFO",
       `New token found: ${metadata.name} (${metadata.symbol}) | Mint: ${newMint}`
     );
+    await sleep(1700);
+
     const rugCheckReport = await checkRug(newMint);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
       return;
     }
-
     await buyToken(newMint, rugCheckReport.risk.level);
   } catch (error) {
     await logEvent("ERROR", "Error processing new pool signature:", { error });
