@@ -66,7 +66,7 @@ async function processNewLiquidityPool(transaction) {
       "INFO",
       `New token found: ${metadata.name} (${metadata.symbol}) | Mint: ${newMint}`
     );
-    await sleep(1700);
+    await sleep(500);
 
     const rugCheckReport = await checkRug(newMint);
     if (!rugCheckReport) {
