@@ -48,8 +48,6 @@ export async function checkRug(mintAddress) {
     if (response.data) {
       const report = response.data;
 
-      // Critical Vetting Rules
-
       if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
@@ -65,7 +63,8 @@ export async function checkRug(mintAddress) {
       if (report.totalMarketLiquidity < MIN_LIQUIDITY_USD) {
         await logEvent("WARN", `Vetting failed: Insufficient liquidity.`, {
           mint: mintAddress,
-          liquidity: report.totalMarketLiquidity,
+          liquidity: report.totalMarketLiquidity.toFixed(2),
+          minRequired: MIN_LIQUIDITY_USD,
         });
         return null;
       }
@@ -75,20 +74,20 @@ export async function checkRug(mintAddress) {
       if (marketCap < MIN_MARKET_CAP_USD) {
         await logEvent("WARN", `Vetting failed: Market cap too low.`, {
           mint: mintAddress,
-          marketCap,
+          marketCap: marketCap.toFixed(2),
+          minRequired: MIN_MARKET_CAP_USD,
         });
         return null;
       }
 
-      let overallRiskLevel = "DANGER"; // Default to DANGER for safety
+      // Determine overall risk level
+      let overallRiskLevel = "DANGER"; // Default to GOOD if no risks are found
       if (report.risks && report.risks.length > 0) {
         const riskLevels = report.risks.map((r) => r.level.toUpperCase());
         if (riskLevels.includes("DANGER")) {
           overallRiskLevel = "DANGER";
         } else if (riskLevels.includes("WARN")) {
           overallRiskLevel = "WARNING";
-        } else {
-          overallRiskLevel = "GOOD";
         }
       }
 

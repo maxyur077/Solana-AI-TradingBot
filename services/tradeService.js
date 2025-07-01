@@ -51,11 +51,23 @@ export async function buyToken(mintAddress, riskLevel) {
   );
   try {
     const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
+
+    // Get the quote from Jupiter
     const quoteResponse = await (
       await fetch(
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
+
+    if (!quoteResponse || quoteResponse.error) {
+      await logEvent("ERROR", "Failed to get a valid quote from Jupiter.", {
+        mintAddress,
+        quoteResponse: quoteResponse || "No response object",
+      });
+      throw new Error(
+        `Failed to get quote: ${quoteResponse?.error || "No quote response"}`
+      );
+    }
 
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
@@ -71,8 +83,10 @@ export async function buyToken(mintAddress, riskLevel) {
       })
     ).json();
 
-    // FIX: Add defensive check for swapTransaction
     if (!swapTransaction) {
+      await logEvent("ERROR", "Jupiter API did not return a swapTransaction.", {
+        mintAddress,
+      });
       throw new Error("Failed to get swap transaction from Jupiter API.");
     }
 
