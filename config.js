@@ -50,7 +50,8 @@ export const TRADE_AMOUNTS = {
   WARNING: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_WARNING")),
   DANGER: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_DANGER")),
 };
-
+export const JUPITER_PRE_QUOTE_DELAY_MS =
+  parseInt(loadEnvVariable("JUPITER_PRE_QUOTE_DELAY_MS"), 10) || 0;
 // Slippage
 export const SLIPPAGE_BPS = parseInt(loadEnvVariable("SLIPPAGE_BPS"), 10);
 

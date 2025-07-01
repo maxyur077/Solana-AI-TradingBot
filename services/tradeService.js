@@ -19,6 +19,7 @@ import {
   TAKE_PROFIT_PERCENT_WARNING,
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
+  JUPITER_PRE_QUOTE_DELAY_MS,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -50,9 +51,15 @@ export async function buyToken(mintAddress, riskLevel) {
     totalPnlUsd
   );
   try {
-    const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
+    if (JUPITER_PRE_QUOTE_DELAY_MS > 0) {
+      await logEvent(
+        "INFO",
+        `Waiting for ${JUPITER_PRE_QUOTE_DELAY_MS}ms before getting Jupiter quote...`
+      );
+      await sleep(JUPITER_PRE_QUOTE_DELAY_MS);
+    }
 
-    // Get the quote from Jupiter
+    const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
     const quoteResponse = await (
       await fetch(
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
