@@ -66,6 +66,7 @@ export async function checkRug(mintAddress) {
           liquidity: report.totalMarketLiquidity.toFixed(2),
           minRequired: MIN_LIQUIDITY_USD,
         });
+
         return null;
       }
 

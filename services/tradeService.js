@@ -20,7 +20,7 @@ import {
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
   MIN_SOL_BALANCE,
-  GLOBAL_STOP_LOSS_USD,
+  CLOSE_ATA_DELAY_MS,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -70,15 +70,14 @@ export async function buyToken(mintAddress, riskLevel) {
     { riskLevel },
     totalPnlUsd
   );
+  await sleep(500);
   try {
-    await sleep(500);
     const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
     const quoteResponse = await (
       await fetch(
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
-
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
         method: "POST",
@@ -266,38 +265,54 @@ export async function sellToken(mintAddress, sellPercentage) {
 }
 
 async function closeTokenAccount(mintAddress) {
+  await sleep(CLOSE_ATA_DELAY_MS); // Wait for network to settle
   await logEvent(
     "INFO",
     `Attempting to close ATA for ${mintAddress}`,
     null,
     totalPnlUsd
   );
-  try {
-    const tokenAta = await getAssociatedTokenAddress(
-      new PublicKey(mintAddress),
-      WALLET_KEYPAIR.publicKey
-    );
-    const closeInstruction = createCloseAccountInstruction(
-      tokenAta,
-      WALLET_KEYPAIR.publicKey,
-      WALLET_KEYPAIR.publicKey
-    );
-    const latestBlockhash = await connection.getLatestBlockhash();
-    const message = new TransactionMessage({
-      payerKey: WALLET_KEYPAIR.publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: [closeInstruction],
-    }).compileToV0Message();
-    const tx = new VersionedTransaction(message);
-    await sendAndConfirmTransaction(tx);
-  } catch (error) {
-    await logEvent(
-      "WARN",
-      `Failed to close ATA for ${mintAddress}.`,
-      { error: error.message },
-      totalPnlUsd
-    );
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      const tokenAta = await getAssociatedTokenAddress(
+        new PublicKey(mintAddress),
+        WALLET_KEYPAIR.publicKey
+      );
+      const closeInstruction = createCloseAccountInstruction(
+        tokenAta,
+        WALLET_KEYPAIR.publicKey,
+        WALLET_KEYPAIR.publicKey
+      );
+      const latestBlockhash = await connection.getLatestBlockhash();
+      const message = new TransactionMessage({
+        payerKey: WALLET_KEYPAIR.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [closeInstruction],
+      }).compileToV0Message();
+      const tx = new VersionedTransaction(message);
+      const txResult = await sendAndConfirmTransaction(tx);
+      if (txResult) {
+        await logEvent(
+          "SUCCESS",
+          `Successfully closed ATA for ${mintAddress}.`
+        );
+        return; // Exit on success
+      }
+    } catch (error) {
+      await logEvent(
+        "WARN",
+        `Attempt ${i + 1} to close ATA for ${mintAddress} failed.`,
+        { error: error.message },
+        totalPnlUsd
+      );
+      await sleep(2000); // Wait before retrying
+    }
   }
+  await logEvent(
+    "ERROR",
+    `Failed to close ATA for ${mintAddress} after multiple retries.`
+  );
 }
 
 async function handleGoodRisk(position, pnlPercentage, mintAddress) {
