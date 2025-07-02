@@ -98,6 +98,7 @@ export const TAKE_PROFIT_GOOD_TIERS = {
     SELL_PERCENT: parseFloat(loadEnvVariable("GOOD_TP_3_SELL_PERCENT")),
   },
 };
+export const MIN_SOL_BALANCE = parseFloat(loadEnvVariable("MIN_SOL_BALANCE"));
 
 // Static Solana Addresses
 export const SOL_MINT = "So11111111111111111111111111111111111111112";

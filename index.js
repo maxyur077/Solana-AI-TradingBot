@@ -3,19 +3,24 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
+  MAX_PORTFOLIO_SIZE,
+  SOL_MINT,
   GLOBAL_STOP_LOSS_USD,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
 import {
   buyToken,
   monitorPortfolio,
+  getPortfolioSize,
   getTotalPnlUsd,
+  getPortfolio,
 } from "./services/tradeService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
 import {
   initDb,
   logEvent,
   hasBeenPurchased,
+  loadActiveTrades,
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
 import chalk from "chalk";
@@ -28,16 +33,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function processNewLiquidityPool(transaction) {
   try {
+    if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
+      return;
+    }
+
     if (
       !transaction ||
       !transaction.meta ||
       !transaction.meta.postTokenBalances
     )
       return;
+
     const postTokenBalances = transaction.meta.postTokenBalances;
     const newMintInfo = postTokenBalances.find(
       (tb) =>
-        tb.mint !== "So11111111111111111111111111111111111111112" &&
+        tb.mint !== SOL_MINT &&
         tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
     );
     if (!newMintInfo) return;
@@ -87,7 +97,6 @@ async function monitorNewPools() {
   connection.onLogs(
     new PublicKey(RAYDIUM_LIQUIDITY_POOL_V4),
     async ({ logs, signature }) => {
-      process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
       if (
         seenSignatures.has(signature) ||
         !logs.some((log) => log.includes("initialize2"))
@@ -110,6 +119,7 @@ async function monitorNewPools() {
     "confirmed"
   );
 }
+
 function startHealthCheckServer() {
   app.get("/health", (req, res) => {
     res.status(200).send("OK");
@@ -122,6 +132,26 @@ function startHealthCheckServer() {
 async function main() {
   await initDb();
   await loadBlacklist();
+
+  const activeTrades = await loadActiveTrades();
+  const portfolio = getPortfolio();
+  for (const trade of activeTrades) {
+    portfolio.set(trade.mint_address, {
+      purchasePrice: trade.token_price_in_sol,
+      amount: 0,
+      tradeAmountSol: trade.sol_amount,
+      riskLevel: "UNKNOWN",
+      profitTakenLevels: [],
+      purchaseTimestamp: new Date(trade.timestamp).getTime(),
+      highestPriceSeen: trade.token_price_in_sol,
+      buySignature: trade.signature,
+    });
+  }
+  await logEvent(
+    "INFO",
+    `Loaded ${portfolio.size} active/failed trades from database.`
+  );
+
   console.log(
     chalk.bold.magenta("====================================================")
   );
@@ -137,12 +167,14 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
+
   startHealthCheckServer();
   monitorNewPools();
+
   setInterval(async () => {
-    process.stdout.write("\r" + " ".repeat(process.stdout.columns) + "\r");
-    logEvent("INFO", "Performing scheduled portfolio check...");
+    await logEvent("INFO", "Performing scheduled portfolio check...");
     await monitorPortfolio();
+
     const currentPnl = getTotalPnlUsd();
     if (currentPnl <= GLOBAL_STOP_LOSS_USD) {
       await logEvent(
@@ -152,7 +184,7 @@ async function main() {
       );
       process.exit(1);
     }
-  }, 60000); // Check every 1 minute
+  }, 60000);
 }
 
 main();

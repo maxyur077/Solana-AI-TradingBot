@@ -19,7 +19,7 @@ import {
   TAKE_PROFIT_PERCENT_WARNING,
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
-  JUPITER_PRE_QUOTE_DELAY_MS,
+  MIN_SOL_BALANCE,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -27,7 +27,12 @@ import {
   connection,
   getSolPriceUsd,
 } from "./solanaService.js";
-import { logEvent, logTrade, addPurchasedToken } from "./databaseService.js";
+import {
+  logEvent,
+  logTrade,
+  addPurchasedToken,
+  updateTradeStatus,
+} from "./databaseService.js";
 import fetch from "cross-fetch";
 
 const portfolio = new Map();
@@ -42,8 +47,23 @@ export function getTotalPnlUsd() {
   return totalPnlUsd;
 }
 
+export function getPortfolio() {
+  return portfolio;
+}
+
 export async function buyToken(mintAddress, riskLevel) {
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
+
+  // Pre-buy SOL balance check
+  const walletBalance = await connection.getBalance(WALLET_KEYPAIR.publicKey);
+  if (walletBalance / LAMPORTS_PER_SOL < tradeAmountSol + MIN_SOL_BALANCE) {
+    await logEvent("ERROR", "Insufficient SOL balance to perform buy.", {
+      currentBalance: walletBalance / LAMPORTS_PER_SOL,
+      required: tradeAmountSol + MIN_SOL_BALANCE,
+    });
+    return false;
+  }
+
   await logEvent(
     "INFO",
     `Attempting to buy ${mintAddress} for ${tradeAmountSol} SOL`,
@@ -51,31 +71,12 @@ export async function buyToken(mintAddress, riskLevel) {
     totalPnlUsd
   );
   try {
-    if (JUPITER_PRE_QUOTE_DELAY_MS > 0) {
-      await logEvent(
-        "INFO",
-        `Waiting for ${JUPITER_PRE_QUOTE_DELAY_MS}ms before getting Jupiter quote...`
-      );
-      await sleep(JUPITER_PRE_QUOTE_DELAY_MS);
-    }
-
     const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
     const quoteResponse = await (
       await fetch(
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
-
-    if (!quoteResponse || quoteResponse.error) {
-      await logEvent("ERROR", "Failed to get a valid quote from Jupiter.", {
-        mintAddress,
-        quoteResponse: quoteResponse || "No response object",
-      });
-      throw new Error(
-        `Failed to get quote: ${quoteResponse?.error || "No quote response"}`
-      );
-    }
-
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
         method: "POST",
@@ -90,12 +91,8 @@ export async function buyToken(mintAddress, riskLevel) {
       })
     ).json();
 
-    if (!swapTransaction) {
-      await logEvent("ERROR", "Jupiter API did not return a swapTransaction.", {
-        mintAddress,
-      });
+    if (!swapTransaction)
       throw new Error("Failed to get swap transaction from Jupiter API.");
-    }
 
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
@@ -120,6 +117,7 @@ export async function buyToken(mintAddress, riskLevel) {
           profitTakenLevels: [],
           purchaseTimestamp: Date.now(),
           highestPriceSeen: purchasePrice,
+          buySignature: txResult.signature, // Store buy signature
         });
         await addPurchasedToken(mintAddress);
         await logTrade(
@@ -149,11 +147,10 @@ export async function buyToken(mintAddress, riskLevel) {
 export async function sellToken(mintAddress, sellPercentage) {
   const maxRetries = 3;
   const retryDelay = 5000;
+  const position = portfolio.get(mintAddress);
+  if (!position) return false;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const position = portfolio.get(mintAddress);
-    if (!position) return false;
-
     await logEvent(
       "INFO",
       `Attempt ${attempt}/${maxRetries} to sell ${sellPercentage}% of ${mintAddress}`,
@@ -176,6 +173,7 @@ export async function sellToken(mintAddress, sellPercentage) {
           totalPnlUsd
         );
         portfolio.delete(mintAddress);
+        await updateTradeStatus(position.buySignature, "SOLD");
         return false;
       }
 
@@ -237,6 +235,7 @@ export async function sellToken(mintAddress, sellPercentage) {
 
         if (sellPercentage === 100) {
           portfolio.delete(mintAddress);
+          await updateTradeStatus(position.buySignature, "SOLD");
           await closeTokenAccount(mintAddress);
         } else if (position) {
           position.amount = (onChainBalance - amountToSell).toString();
@@ -253,12 +252,14 @@ export async function sellToken(mintAddress, sellPercentage) {
     }
     if (attempt < maxRetries) await sleep(retryDelay);
   }
+
   await logEvent(
     "ERROR",
     `Failed to sell ${mintAddress} after ${maxRetries} attempts.`,
     null,
     totalPnlUsd
   );
+  await updateTradeStatus(position.buySignature, "SELL_FAILED");
   return false;
 }
 
@@ -407,7 +408,7 @@ export async function monitorPortfolio() {
       continue;
     }
 
-    if (pnlPercentage <= -5) {
+    if (pnlPercentage <= -10) {
       await logEvent(
         "WARN",
         `Stop loss triggered. Selling 100%.`,
