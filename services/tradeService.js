@@ -20,6 +20,7 @@ import {
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
   MIN_SOL_BALANCE,
+  GLOBAL_STOP_LOSS_USD,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -54,11 +55,10 @@ export function getPortfolio() {
 export async function buyToken(mintAddress, riskLevel) {
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
 
-  // Pre-buy SOL balance check
   const walletBalance = await connection.getBalance(WALLET_KEYPAIR.publicKey);
   if (walletBalance / LAMPORTS_PER_SOL < tradeAmountSol + MIN_SOL_BALANCE) {
-    await logEvent("ERROR", "Insufficient SOL balance to perform buy.", {
-      currentBalance: walletBalance / LAMPORTS_PER_SOL,
+    await logEvent("ERROR", "Insufficient SOL balance.", {
+      current: walletBalance / LAMPORTS_PER_SOL,
       required: tradeAmountSol + MIN_SOL_BALANCE,
     });
     return false;
@@ -71,12 +71,14 @@ export async function buyToken(mintAddress, riskLevel) {
     totalPnlUsd
   );
   try {
+    await sleep(500);
     const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
     const quoteResponse = await (
       await fetch(
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
+
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
         method: "POST",
@@ -117,7 +119,7 @@ export async function buyToken(mintAddress, riskLevel) {
           profitTakenLevels: [],
           purchaseTimestamp: Date.now(),
           highestPriceSeen: purchasePrice,
-          buySignature: txResult.signature, // Store buy signature
+          buySignature: txResult.signature,
         });
         await addPurchasedToken(mintAddress);
         await logTrade(
