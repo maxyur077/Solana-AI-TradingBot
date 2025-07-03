@@ -48,6 +48,19 @@ export async function checkRug(mintAddress) {
     if (response.data) {
       const report = response.data;
 
+      if (report.markets?.[0]?.lp?.lpLockedPct < 70) {
+        await logEvent("WARN", `Vetting failed: LP not 70% locked.`, {
+          mint: mintAddress,
+          lockedPct: report.markets?.[0]?.lp?.lpLockedPct || 0,
+        });
+        return null;
+      }
+      if (report.tokenMeta?.mutable === true) {
+        await logEvent("WARN", `Vetting failed: Metadata is mutable.`, {
+          mint: mintAddress,
+        });
+        return null;
+      }
       if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
@@ -63,10 +76,8 @@ export async function checkRug(mintAddress) {
       if (report.totalMarketLiquidity < MIN_LIQUIDITY_USD) {
         await logEvent("WARN", `Vetting failed: Insufficient liquidity.`, {
           mint: mintAddress,
-          liquidity: report.totalMarketLiquidity.toFixed(2),
-          minRequired: MIN_LIQUIDITY_USD,
+          liquidity: report.totalMarketLiquidity,
         });
-
         return null;
       }
 
@@ -75,20 +86,31 @@ export async function checkRug(mintAddress) {
       if (marketCap < MIN_MARKET_CAP_USD) {
         await logEvent("WARN", `Vetting failed: Market cap too low.`, {
           mint: mintAddress,
-          marketCap: marketCap.toFixed(2),
-          minRequired: MIN_MARKET_CAP_USD,
+          marketCap,
         });
         return null;
       }
 
-      // Determine overall risk level
-      let overallRiskLevel = "DANGER"; // Default to GOOD if no risks are found
+      const top10Percentage = (report.topHolders || [])
+        .slice(0, 10)
+        .reduce((sum, h) => sum + h.pct, 0);
+      if (top10Percentage > MAX_HOLDER_CONCENTRATION_PERCENT) {
+        await logEvent(
+          "WARN",
+          `Vetting failed: Top 10 holders own > ${MAX_HOLDER_CONCENTRATION_PERCENT}%.`,
+          { mint: mintAddress, concentration: `${top10Percentage.toFixed(2)}%` }
+        );
+        return null;
+      }
+      let overallRiskLevel = "DANGER"; // Default to DANGER for safety
       if (report.risks && report.risks.length > 0) {
         const riskLevels = report.risks.map((r) => r.level.toUpperCase());
         if (riskLevels.includes("DANGER")) {
           overallRiskLevel = "DANGER";
         } else if (riskLevels.includes("WARN")) {
           overallRiskLevel = "WARNING";
+        } else {
+          overallRiskLevel = "GOOD";
         }
       }
 
