@@ -48,13 +48,6 @@ export async function checkRug(mintAddress) {
     if (response.data) {
       const report = response.data;
 
-      if (report.markets?.[0]?.lp?.lpLockedPct < 70) {
-        await logEvent("WARN", `Vetting failed: LP not 70% locked.`, {
-          mint: mintAddress,
-          lockedPct: report.markets?.[0]?.lp?.lpLockedPct || 0,
-        });
-        return null;
-      }
       if (report.tokenMeta?.mutable === true) {
         await logEvent("WARN", `Vetting failed: Metadata is mutable.`, {
           mint: mintAddress,
