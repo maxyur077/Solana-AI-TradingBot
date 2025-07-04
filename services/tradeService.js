@@ -35,7 +35,7 @@ import {
   updateTradeStatus,
 } from "./databaseService.js";
 import fetch from "cross-fetch";
-
+import { addToBlacklist } from "./blacklistService.js";
 const portfolio = new Map();
 let totalPnlUsd = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -130,6 +130,7 @@ export async function buyToken(mintAddress, riskLevel) {
           txResult.signature,
           totalPnlUsd
         );
+        await addToBlacklist(metadata.name, metadata.symbol);
         return true;
       }
     }

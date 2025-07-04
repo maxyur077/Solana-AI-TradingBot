@@ -9,3 +9,5 @@
  Tik Tok
  WLFI
  wlfi
+ DeepSeek AI
+ DeepSeek
