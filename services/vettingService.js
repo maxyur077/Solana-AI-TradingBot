@@ -48,12 +48,6 @@ export async function checkRug(mintAddress) {
     if (response.data) {
       const report = response.data;
 
-      if (report.tokenMeta?.mutable === true) {
-        await logEvent("WARN", `Vetting failed: Metadata is mutable.`, {
-          mint: mintAddress,
-        });
-        return null;
-      }
       if (report.token?.freezeAuthority) {
         await logEvent("WARN", `Vetting failed: Token is freezable.`, {
           mint: mintAddress,
@@ -84,17 +78,6 @@ export async function checkRug(mintAddress) {
         return null;
       }
 
-      const top10Percentage = (report.topHolders || [])
-        .slice(0, 10)
-        .reduce((sum, h) => sum + h.pct, 0);
-      if (top10Percentage > MAX_HOLDER_CONCENTRATION_PERCENT) {
-        await logEvent(
-          "WARN",
-          `Vetting failed: Top 10 holders own > ${MAX_HOLDER_CONCENTRATION_PERCENT}%.`,
-          { mint: mintAddress, concentration: `${top10Percentage.toFixed(2)}%` }
-        );
-        return null;
-      }
       let overallRiskLevel = "DANGER"; // Default to DANGER for safety
       if (report.risks && report.risks.length > 0) {
         const riskLevels = report.risks.map((r) => r.level.toUpperCase());

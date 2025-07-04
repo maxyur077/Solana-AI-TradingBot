@@ -184,7 +184,7 @@ async function main() {
       );
       process.exit(1);
     }
-  }, 60000);
+  }, 30000);
 }
 
 main();
