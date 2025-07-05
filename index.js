@@ -83,7 +83,7 @@ async function processNewLiquidityPool(transaction) {
       await logEvent("WARN", `Vetting failed for ${newMint}. Skipping.`);
       return;
     }
-    await buyToken(newMint, rugCheckReport.risk.level);
+    await buyToken(newMint, rugCheckReport.risk.level, metadata); // Pass metadata here
   } catch (error) {
     await logEvent("ERROR", "Error processing new pool signature:", { error });
   }

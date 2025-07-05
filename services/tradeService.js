@@ -21,6 +21,7 @@ import {
   DEEP_LOSS_PERCENT_DANGER,
   MIN_SOL_BALANCE,
   CLOSE_ATA_DELAY_MS,
+  GLOBAL_STOP_LOSS_USD,
 } from "../config.js";
 import {
   sendAndConfirmTransaction,
@@ -34,8 +35,9 @@ import {
   addPurchasedToken,
   updateTradeStatus,
 } from "./databaseService.js";
-import fetch from "cross-fetch";
 import { addToBlacklist } from "./blacklistService.js";
+import fetch from "cross-fetch";
+
 const portfolio = new Map();
 let totalPnlUsd = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,7 +54,7 @@ export function getPortfolio() {
   return portfolio;
 }
 
-export async function buyToken(mintAddress, riskLevel) {
+export async function buyToken(mintAddress, riskLevel, metadata) {
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
 
   const walletBalance = await connection.getBalance(WALLET_KEYPAIR.publicKey);
@@ -70,7 +72,6 @@ export async function buyToken(mintAddress, riskLevel) {
     { riskLevel },
     totalPnlUsd
   );
-  await sleep(500);
   try {
     const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
     const quoteResponse = await (
@@ -130,6 +131,7 @@ export async function buyToken(mintAddress, riskLevel) {
           txResult.signature,
           totalPnlUsd
         );
+
         await addToBlacklist(metadata.name, metadata.symbol);
         return true;
       }
@@ -266,7 +268,7 @@ export async function sellToken(mintAddress, sellPercentage) {
 }
 
 async function closeTokenAccount(mintAddress) {
-  await sleep(CLOSE_ATA_DELAY_MS); // Wait for network to settle
+  await sleep(CLOSE_ATA_DELAY_MS);
   await logEvent(
     "INFO",
     `Attempting to close ATA for ${mintAddress}`,
@@ -298,7 +300,7 @@ async function closeTokenAccount(mintAddress) {
           "SUCCESS",
           `Successfully closed ATA for ${mintAddress}.`
         );
-        return; // Exit on success
+        return;
       }
     } catch (error) {
       await logEvent(
@@ -307,7 +309,7 @@ async function closeTokenAccount(mintAddress) {
         { error: error.message },
         totalPnlUsd
       );
-      await sleep(2000); // Wait before retrying
+      await sleep(2000);
     }
   }
   await logEvent(
