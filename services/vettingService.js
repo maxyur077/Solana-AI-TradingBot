@@ -5,6 +5,7 @@ import {
   MAX_HOLDER_CONCENTRATION_PERCENT,
   MIN_LIQUIDITY_USD,
   MIN_MARKET_CAP_USD,
+  MAX_LIQUIDITY_USD,
 } from "../config.js";
 import fetch from "cross-fetch";
 
