@@ -9,7 +9,7 @@ import { logEvent } from "./databaseService.js";
 
 export const connection = new Connection(RPC_URL, "confirmed");
 
-export async function sendAndConfirmTransaction(tx) {
+export async function sendAndConfirmTransaction(tx, latestBlockhash) {
   try {
     tx.sign([WALLET_KEYPAIR]);
     const signature = await connection.sendRawTransaction(tx.serialize(), {
@@ -17,10 +17,16 @@ export async function sendAndConfirmTransaction(tx) {
       maxRetries: 2,
     });
     await logEvent("INFO", `Transaction sent with signature: ${signature}`);
+
     const confirmation = await connection.confirmTransaction(
-      signature,
+      {
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
       "confirmed"
     );
+
     if (confirmation.value.err) {
       await logEvent("ERROR", "Transaction confirmation failed", {
         signature,
@@ -28,6 +34,7 @@ export async function sendAndConfirmTransaction(tx) {
       });
       return null;
     }
+
     const txDetails = await connection.getTransaction(signature, {
       maxSupportedTransactionVersion: 0,
     });
@@ -38,7 +45,9 @@ export async function sendAndConfirmTransaction(tx) {
     });
     return { signature, fee };
   } catch (error) {
-    await logEvent("ERROR", "Error sending transaction", { error });
+    await logEvent("ERROR", "Error sending transaction", {
+      error: error.message,
+    });
     return null;
   }
 }

@@ -79,6 +79,7 @@ export async function buyToken(mintAddress, riskLevel, metadata) {
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
+
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
         method: "POST",
@@ -99,7 +100,11 @@ export async function buyToken(mintAddress, riskLevel, metadata) {
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
 
-    const txResult = await sendAndConfirmTransaction(transaction);
+    const latestBlockhash = await connection.getLatestBlockhash();
+    const txResult = await sendAndConfirmTransaction(
+      transaction,
+      latestBlockhash
+    );
     if (txResult) {
       const purchasePrice = await getTokenPriceInSol(mintAddress);
       if (purchasePrice > 0) {
@@ -212,7 +217,11 @@ export async function sellToken(mintAddress, sellPercentage) {
 
       const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
       const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-      const txResult = await sendAndConfirmTransaction(transaction);
+      const latestBlockhash = await connection.getLatestBlockhash();
+      const txResult = await sendAndConfirmTransaction(
+        transaction,
+        latestBlockhash
+      );
 
       if (txResult) {
         const sellPrice =
@@ -294,7 +303,7 @@ async function closeTokenAccount(mintAddress) {
         instructions: [closeInstruction],
       }).compileToV0Message();
       const tx = new VersionedTransaction(message);
-      const txResult = await sendAndConfirmTransaction(tx);
+      const txResult = await sendAndConfirmTransaction(tx, latestBlockhash);
       if (txResult) {
         await logEvent(
           "SUCCESS",
