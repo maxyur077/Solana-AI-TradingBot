@@ -103,7 +103,9 @@ export const CLOSE_ATA_DELAY_MS = parseInt(
   10
 );
 export const MIN_SOL_BALANCE = parseFloat(loadEnvVariable("MIN_SOL_BALANCE"));
-
+export const MAX_LIQUIDITY_USD = parseFloat(
+  loadEnvVariable("MAX_LIQUIDITY_USD")
+);
 // Static Solana Addresses
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const RAYDIUM_LIQUIDITY_POOL_V4 =

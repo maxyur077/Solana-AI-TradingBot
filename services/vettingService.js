@@ -67,6 +67,13 @@ export async function checkRug(mintAddress) {
         });
         return null;
       }
+      if (report.totalMarketLiquidity > MAX_LIQUIDITY_USD) {
+        await logEvent("WARN", `Vetting failed: Liquidity too high.`, {
+          mint: mintAddress,
+          liquidity: report.totalMarketLiquidity,
+        });
+        return null;
+      }
 
       const marketCap =
         report.price * (report.token.supply / 10 ** report.token.decimals);
