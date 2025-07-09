@@ -36,6 +36,10 @@ import {
   updateTradeStatus,
 } from "./databaseService.js";
 import { addToBlacklist } from "./blacklistService.js";
+import {
+  sendBuyNotification,
+  sendSellNotification,
+} from "./telegramService.js";
 import fetch from "cross-fetch";
 
 const portfolio = new Map();
@@ -136,6 +140,7 @@ export async function buyToken(mintAddress, riskLevel, metadata) {
           txResult.signature,
           totalPnlUsd
         );
+        await sendBuyNotification(metadata, tradeAmountSol, txResult.signature);
 
         await addToBlacklist(metadata.name, metadata.symbol);
         return true;
@@ -234,7 +239,11 @@ export async function sellToken(mintAddress, sellPercentage) {
           position.tradeAmountSol * (sellPercentage / 100);
         const profitInSol = receivedSol - initialInvestment;
         const solPrice = await getSolPriceUsd();
-        if (solPrice > 0) totalPnlUsd += profitInSol * solPrice;
+        let profitUsd = 0;
+        if (solPrice > 0) {
+          profitUsd = profitInSol * solPrice;
+          totalPnlUsd += profitUsd;
+        }
 
         await logTrade(
           "SELL",
@@ -244,6 +253,13 @@ export async function sellToken(mintAddress, sellPercentage) {
           txResult.fee,
           txResult.signature,
           totalPnlUsd
+        );
+        await sendSellNotification(
+          mintAddress,
+          receivedSol,
+          profitUsd,
+          totalPnlUsd,
+          txResult.signature
         );
 
         if (sellPercentage === 100) {

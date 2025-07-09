@@ -69,6 +69,8 @@ export const MIN_LIQUIDITY_USD = parseFloat(
 export const MIN_MARKET_CAP_USD = parseFloat(
   loadEnvVariable("MIN_MARKET_CAP_USD")
 );
+export const BITQUERY_API_KEY = loadEnvVariable("BITQUERY_API_KEY", true);
+
 export const DEEP_LOSS_PERCENT_DANGER = parseFloat(
   loadEnvVariable("DEEP_LOSS_PERCENT_DANGER")
 );
@@ -110,3 +112,12 @@ export const MAX_LIQUIDITY_USD = parseFloat(
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const RAYDIUM_LIQUIDITY_POOL_V4 =
   "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+export const TELEGRAM_BOT_TOKEN = loadEnvVariable("TELEGRAM_BOT_TOKEN", true);
+export const TELEGRAM_CHAT_ID = loadEnvVariable("TELEGRAM_CHAT_ID");
+export const MAX_DEV_WALLET_COUNT = parseInt(
+  loadEnvVariable("MAX_DEV_WALLET_COUNT"),
+  10
+);
+export const MAX_INITIAL_DEV_SELL_PERCENT = parseFloat(
+  loadEnvVariable("MAX_INITIAL_DEV_SELL_PERCENT")
+);

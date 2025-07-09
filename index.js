@@ -23,6 +23,7 @@ import {
   loadActiveTrades,
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
+import { sendStartupNotification } from "./services/telegramService.js";
 import chalk from "chalk";
 import express from "express";
 
@@ -167,6 +168,7 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
+  await sendStartupNotification(WALLET_KEYPAIR.publicKey.toBase58());
 
   startHealthCheckServer();
   monitorNewPools();
