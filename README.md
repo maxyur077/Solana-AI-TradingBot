@@ -37,6 +37,8 @@ This bot leverages AI-powered analysis, sophisticated risk management, and dynam
 
 ## Demo
 https://github.com/user-attachments/assets/7408831d-59ed-4448-8422-82a980fe4c2c
+![WhatsApp Image 2025-07-15 at 6 12 42 PM](https://github.com/user-attachments/assets/545dcfb6-8749-4864-a80e-d3f03125d9e8)
+
 
 
 
