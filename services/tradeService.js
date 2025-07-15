@@ -19,6 +19,8 @@ import {
   TAKE_PROFIT_PERCENT_WARNING,
   STALE_DANGER_COIN_MINUTES,
   DEEP_LOSS_PERCENT_DANGER,
+  MIN_SOL_BALANCE,
+  CLOSE_ATA_DELAY_MS,
   GLOBAL_STOP_LOSS_USD,
 } from "../config.js";
 import {
@@ -27,7 +29,17 @@ import {
   connection,
   getSolPriceUsd,
 } from "./solanaService.js";
-import { logEvent, logTrade, addPurchasedToken } from "./databaseService.js";
+import {
+  logEvent,
+  logTrade,
+  addPurchasedToken,
+  updateTradeStatus,
+} from "./databaseService.js";
+import { addToBlacklist } from "./blacklistService.js";
+import {
+  sendBuyNotification,
+  sendSellNotification,
+} from "./telegramService.js";
 import fetch from "cross-fetch";
 
 const portfolio = new Map();
@@ -38,8 +50,26 @@ export function getPortfolioSize() {
   return portfolio.size;
 }
 
-export async function buyToken(mintAddress, riskLevel) {
+export function getTotalPnlUsd() {
+  return totalPnlUsd;
+}
+
+export function getPortfolio() {
+  return portfolio;
+}
+
+export async function buyToken(mintAddress, riskLevel, metadata) {
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
+
+  const walletBalance = await connection.getBalance(WALLET_KEYPAIR.publicKey);
+  if (walletBalance / LAMPORTS_PER_SOL < tradeAmountSol + MIN_SOL_BALANCE) {
+    await logEvent("ERROR", "Insufficient SOL balance.", {
+      current: walletBalance / LAMPORTS_PER_SOL,
+      required: tradeAmountSol + MIN_SOL_BALANCE,
+    });
+    return false;
+  }
+
   await logEvent(
     "INFO",
     `Attempting to buy ${mintAddress} for ${tradeAmountSol} SOL`,
@@ -53,6 +83,7 @@ export async function buyToken(mintAddress, riskLevel) {
         `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
       )
     ).json();
+
     const { swapTransaction } = await (
       await fetch("https://quote-api.jup.ag/v6/swap", {
         method: "POST",
@@ -66,10 +97,18 @@ export async function buyToken(mintAddress, riskLevel) {
         }),
       })
     ).json();
+
+    if (!swapTransaction)
+      throw new Error("Failed to get swap transaction from Jupiter API.");
+
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
 
-    const txResult = await sendAndConfirmTransaction(transaction);
+    const latestBlockhash = await connection.getLatestBlockhash();
+    const txResult = await sendAndConfirmTransaction(
+      transaction,
+      latestBlockhash
+    );
     if (txResult) {
       const purchasePrice = await getTokenPriceInSol(mintAddress);
       if (purchasePrice > 0) {
@@ -89,6 +128,7 @@ export async function buyToken(mintAddress, riskLevel) {
           profitTakenLevels: [],
           purchaseTimestamp: Date.now(),
           highestPriceSeen: purchasePrice,
+          buySignature: txResult.signature,
         });
         await addPurchasedToken(mintAddress);
         await logTrade(
@@ -100,6 +140,9 @@ export async function buyToken(mintAddress, riskLevel) {
           txResult.signature,
           totalPnlUsd
         );
+        await sendBuyNotification(metadata, tradeAmountSol, txResult.signature);
+
+        await addToBlacklist(metadata.name, metadata.symbol);
         return true;
       }
     }
@@ -118,11 +161,10 @@ export async function buyToken(mintAddress, riskLevel) {
 export async function sellToken(mintAddress, sellPercentage) {
   const maxRetries = 3;
   const retryDelay = 5000;
+  const position = portfolio.get(mintAddress);
+  if (!position) return false;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const position = portfolio.get(mintAddress);
-    if (!position) return false;
-
     await logEvent(
       "INFO",
       `Attempt ${attempt}/${maxRetries} to sell ${sellPercentage}% of ${mintAddress}`,
@@ -145,6 +187,7 @@ export async function sellToken(mintAddress, sellPercentage) {
           totalPnlUsd
         );
         portfolio.delete(mintAddress);
+        await updateTradeStatus(position.buySignature, "SOLD");
         return false;
       }
 
@@ -179,7 +222,11 @@ export async function sellToken(mintAddress, sellPercentage) {
 
       const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
       const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-      const txResult = await sendAndConfirmTransaction(transaction);
+      const latestBlockhash = await connection.getLatestBlockhash();
+      const txResult = await sendAndConfirmTransaction(
+        transaction,
+        latestBlockhash
+      );
 
       if (txResult) {
         const sellPrice =
@@ -192,7 +239,11 @@ export async function sellToken(mintAddress, sellPercentage) {
           position.tradeAmountSol * (sellPercentage / 100);
         const profitInSol = receivedSol - initialInvestment;
         const solPrice = await getSolPriceUsd();
-        if (solPrice > 0) totalPnlUsd += profitInSol * solPrice;
+        let profitUsd = 0;
+        if (solPrice > 0) {
+          profitUsd = profitInSol * solPrice;
+          totalPnlUsd += profitUsd;
+        }
 
         // Global Stop-Loss Check
         if (totalPnlUsd <= GLOBAL_STOP_LOSS_USD) {
@@ -213,9 +264,17 @@ export async function sellToken(mintAddress, sellPercentage) {
           txResult.signature,
           totalPnlUsd
         );
+        await sendSellNotification(
+          mintAddress,
+          receivedSol,
+          profitUsd,
+          totalPnlUsd,
+          txResult.signature
+        );
 
         if (sellPercentage === 100) {
           portfolio.delete(mintAddress);
+          await updateTradeStatus(position.buySignature, "SOLD");
           await closeTokenAccount(mintAddress);
         } else if (position) {
           position.amount = (onChainBalance - amountToSell).toString();
@@ -232,48 +291,66 @@ export async function sellToken(mintAddress, sellPercentage) {
     }
     if (attempt < maxRetries) await sleep(retryDelay);
   }
+
   await logEvent(
     "ERROR",
     `Failed to sell ${mintAddress} after ${maxRetries} attempts.`,
     null,
     totalPnlUsd
   );
+  await updateTradeStatus(position.buySignature, "SELL_FAILED");
   return false;
 }
 
 async function closeTokenAccount(mintAddress) {
+  await sleep(CLOSE_ATA_DELAY_MS);
   await logEvent(
     "INFO",
     `Attempting to close ATA for ${mintAddress}`,
     null,
     totalPnlUsd
   );
-  try {
-    const tokenAta = await getAssociatedTokenAddress(
-      new PublicKey(mintAddress),
-      WALLET_KEYPAIR.publicKey
-    );
-    const closeInstruction = createCloseAccountInstruction(
-      tokenAta,
-      WALLET_KEYPAIR.publicKey,
-      WALLET_KEYPAIR.publicKey
-    );
-    const latestBlockhash = await connection.getLatestBlockhash();
-    const message = new TransactionMessage({
-      payerKey: WALLET_KEYPAIR.publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: [closeInstruction],
-    }).compileToV0Message();
-    const tx = new VersionedTransaction(message);
-    await sendAndConfirmTransaction(tx);
-  } catch (error) {
-    await logEvent(
-      "WARN",
-      `Failed to close ATA for ${mintAddress}.`,
-      { error: error.message },
-      totalPnlUsd
-    );
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      const tokenAta = await getAssociatedTokenAddress(
+        new PublicKey(mintAddress),
+        WALLET_KEYPAIR.publicKey
+      );
+      const closeInstruction = createCloseAccountInstruction(
+        tokenAta,
+        WALLET_KEYPAIR.publicKey,
+        WALLET_KEYPAIR.publicKey
+      );
+      const latestBlockhash = await connection.getLatestBlockhash();
+      const message = new TransactionMessage({
+        payerKey: WALLET_KEYPAIR.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [closeInstruction],
+      }).compileToV0Message();
+      const tx = new VersionedTransaction(message);
+      const txResult = await sendAndConfirmTransaction(tx, latestBlockhash);
+      if (txResult) {
+        await logEvent(
+          "SUCCESS",
+          `Successfully closed ATA for ${mintAddress}.`
+        );
+        return;
+      }
+    } catch (error) {
+      await logEvent(
+        "WARN",
+        `Attempt ${i + 1} to close ATA for ${mintAddress} failed.`,
+        { error: error.message },
+        totalPnlUsd
+      );
+      await sleep(2000);
+    }
   }
+  await logEvent(
+    "ERROR",
+    `Failed to close ATA for ${mintAddress} after multiple retries.`
+  );
 }
 
 async function handleGoodRisk(position, pnlPercentage, mintAddress) {

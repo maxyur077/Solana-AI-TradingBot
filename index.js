@@ -3,38 +3,34 @@ import {
   RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
-  MIN_LIQUIDITY_SOL,
   MAX_PORTFOLIO_SIZE,
   SOL_MINT,
-  HEALTH_CHECK_PORT,
-  VETTING_DELAY_MS,
+  GLOBAL_STOP_LOSS_USD,
 } from "./config.js";
 import { shouldBuyToken } from "./services/geminiService.js";
 import {
   buyToken,
   monitorPortfolio,
   getPortfolioSize,
+  getTotalPnlUsd,
+  getPortfolio,
 } from "./services/tradeService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
 import {
   initDb,
   logEvent,
   hasBeenPurchased,
+  loadActiveTrades,
 } from "./services/databaseService.js";
 import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
-import {
-  monitorBitQuery,
-  bitqueryEmitter,
-} from "./services/bitqueryService.js";
+import { sendStartupNotification } from "./services/telegramService.js";
 import chalk from "chalk";
 import express from "express";
-import { Mutex } from "async-mutex";
 
 const app = express();
 const seenSignatures = new Set();
 const seenMints = new Set();
 const connection = new Connection(RPC_URL, "confirmed");
-const processingMutex = new Mutex();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function processNewToken(tokenData) {
@@ -44,18 +40,30 @@ async function processNewToken(tokenData) {
       return;
     }
 
-    const { mint, source, initialLiquiditySol } = tokenData;
-
-    if (await hasBeenPurchased(mint)) {
+    if (
+      !transaction ||
+      !transaction.meta ||
+      !transaction.meta.postTokenBalances
+    )
       return;
-    }
 
-    await logEvent("INFO", `Vetting delay for ${mint}...`);
-    await sleep(VETTING_DELAY_MS);
+    const postTokenBalances = transaction.meta.postTokenBalances;
+    const newMintInfo = postTokenBalances.find(
+      (tb) =>
+        tb.mint !== SOL_MINT &&
+        tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+    );
+    if (!newMintInfo) return;
+    const newMint = newMintInfo.mint;
 
-    const metadata = await getTokenMetadata(mint);
+    if (await hasBeenPurchased(newMint)) return;
+
+    const metadata = await getTokenMetadata(newMint);
     if (!metadata) {
-      await logEvent("WARN", `Could not fetch metadata for ${mint}. Skipping.`);
+      await logEvent(
+        "WARN",
+        `Could not fetch metadata for ${newMint}. Skipping.`
+      );
       return;
     }
 
@@ -69,25 +77,16 @@ async function processNewToken(tokenData) {
 
     await logEvent(
       "INFO",
-      `Vetting token from ${source}: ${metadata.name} (${metadata.symbol})`,
-      { initialLiquiditySol }
+      `New token found: ${metadata.name} (${metadata.symbol}) | Mint: ${newMint}`
     );
+    await sleep(500);
 
     const rugCheckReport = await checkRug(mint);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${mint}. Skipping.`);
       return;
     }
-
-    const decision = await shouldBuyToken(metadata, rugCheckReport);
-    if (decision) {
-      await buyToken(mint, rugCheckReport.risk.level);
-    } else {
-      await logEvent(
-        "INFO",
-        `Decision: PASS on ${metadata.symbol} based on AI recommendation.`
-      );
-    }
+    await buyToken(newMint, rugCheckReport.risk.level, metadata); // Pass metadata here
   } catch (error) {
     await logEvent("ERROR", "Error processing new token:", {
       tokenData,
@@ -99,7 +98,7 @@ async function processNewToken(tokenData) {
   }
 }
 
-async function monitorRaydiumPools() {
+async function monitorNewPools() {
   await logEvent(
     "INFO",
     "Starting real-time log monitoring for new Raydium liquidity pools..."
@@ -113,7 +112,6 @@ async function monitorRaydiumPools() {
       )
         return;
       seenSignatures.add(signature);
-
       try {
         const tx = await connection.getParsedTransaction(signature, {
           maxSupportedTransactionVersion: 0,
@@ -160,17 +158,34 @@ function startHealthCheckServer() {
   app.get("/health", (req, res) => {
     res.status(200).send("OK");
   });
-  app.listen(HEALTH_CHECK_PORT, () => {
-    logEvent(
-      "INFO",
-      `Health check server started on port ${HEALTH_CHECK_PORT}`
-    );
+  app.listen(process.env.PORT, () => {
+    logEvent("INFO", `Health check server started on port ${process.env.PORT}`);
   });
 }
 
 async function main() {
   await initDb();
   await loadBlacklist();
+
+  const activeTrades = await loadActiveTrades();
+  const portfolio = getPortfolio();
+  for (const trade of activeTrades) {
+    portfolio.set(trade.mint_address, {
+      purchasePrice: trade.token_price_in_sol,
+      amount: 0,
+      tradeAmountSol: trade.sol_amount,
+      riskLevel: "UNKNOWN",
+      profitTakenLevels: [],
+      purchaseTimestamp: new Date(trade.timestamp).getTime(),
+      highestPriceSeen: trade.token_price_in_sol,
+      buySignature: trade.signature,
+    });
+  }
+  await logEvent(
+    "INFO",
+    `Loaded ${portfolio.size} active/failed trades from database.`
+  );
+
   console.log(
     chalk.bold.magenta("====================================================")
   );
@@ -186,46 +201,25 @@ async function main() {
     "INFO",
     `Wallet Public Key: ${WALLET_KEYPAIR.publicKey.toBase58()}`
   );
+  await sendStartupNotification(WALLET_KEYPAIR.publicKey.toBase58());
 
   startHealthCheckServer();
-  monitorRaydiumPools();
-  monitorBitQuery();
+  monitorNewPools();
 
-  let isAcceptingNewTokens = true;
+  setInterval(async () => {
+    await logEvent("INFO", "Performing scheduled portfolio check...");
+    await monitorPortfolio();
 
-  // Main loop to control token acceptance
-  setInterval(() => {
-    if (getPortfolioSize() > 0) {
-      if (isAcceptingNewTokens) {
-        logEvent(
-          "WARN",
-          "Portfolio is active. Pausing detection of new tokens."
-        );
-        isAcceptingNewTokens = false;
-      }
-    } else {
-      if (!isAcceptingNewTokens) {
-        logEvent(
-          "SUCCESS",
-          "Portfolio is empty. Resuming detection of new tokens."
-        );
-        isAcceptingNewTokens = true;
-      }
+    const currentPnl = getTotalPnlUsd();
+    if (currentPnl <= GLOBAL_STOP_LOSS_USD) {
+      await logEvent(
+        "ERROR",
+        "GLOBAL STOP-LOSS TRIGGERED! Shutting down bot.",
+        { totalPnlUsd: currentPnl }
+      );
+      process.exit(1);
     }
-  }, 5000); // Check every 5 seconds
-
-  bitqueryEmitter.on("newToken", (tokenData) => {
-    if (!isAcceptingNewTokens || seenMints.has(tokenData.mint)) {
-      return;
-    }
-    seenMints.add(tokenData.mint);
-    processNewToken(tokenData);
-  });
-
-  setInterval(() => {
-    logEvent("INFO", "Performing scheduled portfolio check...");
-    monitorPortfolio();
-  }, 60000);
+  }, 30000);
 }
 
 main();

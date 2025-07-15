@@ -45,16 +45,6 @@ export const GLOBAL_STOP_LOSS_USD = parseFloat(
 );
 
 // Vetting Strategy
-export const VETTING_DELAY_MS = parseInt(
-  loadEnvVariable("VETTING_DELAY_MS"),
-  10
-);
-export const MIN_LIQUIDITY_SOL = parseFloat(
-  loadEnvVariable("MIN_LIQUIDITY_SOL")
-);
-export const MIN_LIQUIDITY_USD = parseFloat(
-  loadEnvVariable("MIN_LIQUIDITY_USD")
-);
 export const MAX_HOLDER_CONCENTRATION_PERCENT = parseFloat(
   loadEnvVariable("MAX_HOLDER_CONCENTRATION_PERCENT")
 );
@@ -65,7 +55,8 @@ export const TRADE_AMOUNTS = {
   WARNING: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_WARNING")),
   DANGER: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_DANGER")),
 };
-
+export const JUPITER_PRE_QUOTE_DELAY_MS =
+  parseInt(loadEnvVariable("JUPITER_PRE_QUOTE_DELAY_MS"), 10) || 0;
 // Slippage
 export const SLIPPAGE_BPS = parseInt(loadEnvVariable("SLIPPAGE_BPS"), 10);
 
@@ -77,8 +68,20 @@ export const STALE_DANGER_COIN_MINUTES = parseInt(
   loadEnvVariable("STALE_DANGER_COIN_MINUTES"),
   10
 );
+export const MIN_LIQUIDITY_USD = parseFloat(
+  loadEnvVariable("MIN_LIQUIDITY_USD")
+);
+export const MIN_MARKET_CAP_USD = parseFloat(
+  loadEnvVariable("MIN_MARKET_CAP_USD")
+);
+export const BITQUERY_API_KEY = loadEnvVariable("BITQUERY_API_KEY", true);
+
 export const DEEP_LOSS_PERCENT_DANGER = parseFloat(
   loadEnvVariable("DEEP_LOSS_PERCENT_DANGER")
+);
+
+export const GLOBAL_STOP_LOSS_USD = parseFloat(
+  loadEnvVariable("GLOBAL_STOP_LOSS_USD")
 );
 
 // Take Profit Strategies
@@ -102,8 +105,24 @@ export const TAKE_PROFIT_GOOD_TIERS = {
     SELL_PERCENT: parseFloat(loadEnvVariable("GOOD_TP_3_SELL_PERCENT")),
   },
 };
-
+export const CLOSE_ATA_DELAY_MS = parseInt(
+  loadEnvVariable("CLOSE_ATA_DELAY_MS"),
+  10
+);
+export const MIN_SOL_BALANCE = parseFloat(loadEnvVariable("MIN_SOL_BALANCE"));
+export const MAX_LIQUIDITY_USD = parseFloat(
+  loadEnvVariable("MAX_LIQUIDITY_USD")
+);
 // Static Solana Addresses
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const RAYDIUM_LIQUIDITY_POOL_V4 =
   "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+export const TELEGRAM_BOT_TOKEN = loadEnvVariable("TELEGRAM_BOT_TOKEN", true);
+export const TELEGRAM_CHAT_ID = loadEnvVariable("TELEGRAM_CHAT_ID");
+export const MAX_DEV_WALLET_COUNT = parseInt(
+  loadEnvVariable("MAX_DEV_WALLET_COUNT"),
+  10
+);
+export const MAX_INITIAL_DEV_SELL_PERCENT = parseFloat(
+  loadEnvVariable("MAX_INITIAL_DEV_SELL_PERCENT")
+);

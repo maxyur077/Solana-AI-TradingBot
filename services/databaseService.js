@@ -13,7 +13,8 @@ const TRADE_TABLE_SCHEMA = `
         sol_amount REAL NOT NULL,
         token_price_in_sol REAL NOT NULL,
         transaction_fee_sol REAL,
-        signature TEXT
+        signature TEXT,
+        status TEXT NOT NULL DEFAULT 'BOUGHT' -- BOUGHT, SOLD, SELL_FAILED
     );
 `;
 
@@ -45,6 +46,11 @@ export async function initDb() {
     const tradesInfo = await db.all("PRAGMA table_info(trades);");
     if (!tradesInfo.some((col) => col.name === "transaction_fee_sol")) {
       await db.exec("ALTER TABLE trades ADD COLUMN transaction_fee_sol REAL;");
+    }
+    if (!tradesInfo.some((col) => col.name === "status")) {
+      await db.exec(
+        "ALTER TABLE trades ADD COLUMN status TEXT NOT NULL DEFAULT 'BOUGHT';"
+      );
     }
 
     const logsInfo = await db.all("PRAGMA table_info(app_logs);");
@@ -120,9 +126,10 @@ export async function logTrade(
   totalPnlUsd
 ) {
   try {
+    const status = tradeType === "BUY" ? "BOUGHT" : "SOLD";
     await db.run(
-      "INSERT INTO trades (trade_type, mint_address, sol_amount, token_price_in_sol, transaction_fee_sol, signature) VALUES (?, ?, ?, ?, ?, ?)",
-      [tradeType, mint, solAmount, price, fee, signature]
+      "INSERT INTO trades (trade_type, mint_address, sol_amount, token_price_in_sol, transaction_fee_sol, signature, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [tradeType, mint, solAmount, price, fee, signature, status]
     );
     await logEvent(
       "SUCCESS",
@@ -132,6 +139,35 @@ export async function logTrade(
     );
   } catch (error) {
     console.error("Failed to write to trades table:", error);
+  }
+}
+
+export async function updateTradeStatus(signature, status) {
+  try {
+    await db.run("UPDATE trades SET status = ? WHERE signature = ?", [
+      status,
+      signature,
+    ]);
+    await logEvent("INFO", `Updated trade status to ${status}`, { signature });
+  } catch (error) {
+    await logEvent("ERROR", "Failed to update trade status", {
+      error,
+      signature,
+    });
+  }
+}
+
+export async function loadActiveTrades() {
+  try {
+    const activeTrades = await db.all(
+      "SELECT * FROM trades WHERE status = 'BOUGHT' OR status = 'SELL_FAILED'"
+    );
+    return activeTrades;
+  } catch (error) {
+    await logEvent("ERROR", "Failed to load active trades from database", {
+      error,
+    });
+    return [];
   }
 }
 
