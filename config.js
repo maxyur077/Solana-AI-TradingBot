@@ -74,14 +74,9 @@ export const MIN_LIQUIDITY_USD = parseFloat(
 export const MIN_MARKET_CAP_USD = parseFloat(
   loadEnvVariable("MIN_MARKET_CAP_USD")
 );
-export const BITQUERY_API_KEY = loadEnvVariable("BITQUERY_API_KEY", true);
 
 export const DEEP_LOSS_PERCENT_DANGER = parseFloat(
   loadEnvVariable("DEEP_LOSS_PERCENT_DANGER")
-);
-
-export const GLOBAL_STOP_LOSS_USD = parseFloat(
-  loadEnvVariable("GLOBAL_STOP_LOSS_USD")
 );
 
 // Take Profit Strategies
