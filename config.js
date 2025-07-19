@@ -59,6 +59,9 @@ export const SLIPPAGE_BPS = parseInt(loadEnvVariable("SLIPPAGE_BPS"), 10);
 export const TRAILING_STOP_LOSS_PERCENT = parseFloat(
   loadEnvVariable("TRAILING_STOP_LOSS_PERCENT")
 );
+
+export const HELIUS_API_KEY = parseFloat(loadEnvVariable("HELIUS_API_KEY"));
+
 export const STALE_DANGER_COIN_MINUTES = parseInt(
   loadEnvVariable("STALE_DANGER_COIN_MINUTES"),
   10

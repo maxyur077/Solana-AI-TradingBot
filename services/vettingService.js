@@ -2,9 +2,11 @@ import axios from "axios";
 import { logEvent } from "./databaseService.js";
 import {
   RPC_URL,
+  HELIUS_API_KEY, // Make sure you have HELIUS_API_KEY in your config
+  MAX_HOLDER_CONCENTRATION_PERCENT,
+  MIN_LIQUIDITY_USD,
   MAX_LIQUIDITY_USD,
   MIN_MARKET_CAP_USD,
-  MIN_LIQUIDITY_USD,
   MAX_DEV_WALLET_COUNT,
   MAX_INITIAL_DEV_SELL_PERCENT,
 } from "../config.js";
@@ -62,12 +64,8 @@ async function getCreatorFromHelius(mintAddress) {
     );
     return null;
   }
-  const heliusRpcUrl = RPC_URL;
+  const heliusRpcUrl = `https://rpc.helius.xyz/?api-key=${HELIUS_API_KEY}`;
   try {
-    await logEvent(
-      "INFO",
-      `Fetching creator from Helius for mint: ${mintAddress}`
-    );
     const response = await fetch(heliusRpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -79,10 +77,7 @@ async function getCreatorFromHelius(mintAddress) {
       }),
     });
     const { result } = await response.json();
-
     if (result && result.authorities && result.authorities.length > 0) {
-      // The creator is typically the first authority listed.
-      // A more robust check can be done by looking at the `scope`.
       const creatorAuthority = result.authorities.find(
         (auth) => auth.scope === "creator"
       );
@@ -119,12 +114,10 @@ async function detectEarlyDevSell(creatorAddress, mintAddress) {
   try {
     const creatorPubKey = new PublicKey(creatorAddress);
     const mintPubKey = new PublicKey(mintAddress);
-
     const creatorTokenAccounts = await connection.getParsedTokenAccountsByOwner(
       creatorPubKey,
       { mint: mintPubKey }
     );
-
     if (creatorTokenAccounts.value.length === 0) {
       await logEvent(
         "INFO",
@@ -132,12 +125,10 @@ async function detectEarlyDevSell(creatorAddress, mintAddress) {
       );
       return false;
     }
-
     const initialBalance = parseInt(
       creatorTokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount,
       10
     );
-
     if (initialBalance === 0) {
       await logEvent(
         "INFO",
@@ -145,30 +136,23 @@ async function detectEarlyDevSell(creatorAddress, mintAddress) {
       );
       return false;
     }
-
     const signatures = await connection.getSignaturesForAddress(creatorPubKey, {
       limit: 25,
     });
-
     if (!signatures || signatures.length === 0) return false;
-
     const fiveMinutesAgo = Date.now() / 1000 - 300;
-
     for (const tx of signatures) {
       if (tx.blockTime < fiveMinutesAgo) continue;
-
       const parsedTx = await connection.getParsedTransaction(tx.signature, {
         maxSupportedTransactionVersion: 0,
       });
       if (!parsedTx || !parsedTx.meta) continue;
-
       const preBalance = parsedTx.meta.preTokenBalances.find(
         (b) => b.owner === creatorAddress && b.mint === mintAddress
       );
       const postBalance = parsedTx.meta.postTokenBalances.find(
         (b) => b.owner === creatorAddress && b.mint === mintAddress
       );
-
       if (preBalance && postBalance) {
         const soldAmount =
           parseInt(preBalance.uiTokenAmount.amount, 10) -
@@ -210,7 +194,6 @@ export async function checkRug(mintAddress) {
     `Starting comprehensive vetting for token: ${mintAddress}`
   );
   try {
-    // --- Step 1: Get Primary Report from RugCheck.xyz ---
     const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report`;
     const response = await axios.get(url);
     const report = response.data;
@@ -222,6 +205,7 @@ export async function checkRug(mintAddress) {
       return null;
     }
 
+    // --- Vetting Pipeline ---
     if (report.simulation?.loss > 0) {
       await logEvent(
         "WARN",
@@ -269,15 +253,9 @@ export async function checkRug(mintAddress) {
       return null;
     }
 
-    let creatorAddress = null;
-    if (report.creator && typeof report.creator === "string") {
-      creatorAddress = report.creator;
-      await logEvent(
-        "INFO",
-        `Creator address found in RugCheck report: ${creatorAddress}`,
-        { mint: mintAddress }
-      );
-    } else {
+    // Creator and insider checks
+    let creatorAddress = report.creator?.address || report.creator;
+    if (!creatorAddress) {
       await logEvent(
         "WARN",
         `Creator not in rugcheck report, using Helius as fallback.`,
@@ -287,36 +265,26 @@ export async function checkRug(mintAddress) {
     }
 
     if (creatorAddress) {
+      await logEvent("INFO", `Creator address found: ${creatorAddress}`, {
+        mint: mintAddress,
+      });
       if (await detectEarlyDevSell(creatorAddress, mintAddress)) {
         return null;
       }
     } else {
       await logEvent(
         "WARN",
-        `Could not perform early dev sell check. Creator address not found from any source.`,
+        `Could not perform early dev sell check. Creator address not found.`,
         { mint: mintAddress }
       );
     }
 
-    if (report.graphInsidersDetected > MAX_DEV_WALLET_COUNT) {
-      await logEvent(
-        "WARN",
-        `Vetting failed: High number of insider wallets detected.`,
-        { mint: mintAddress, count: report.graphInsidersDetected }
-      );
-      return null;
-    }
-
+    // --- Determine Risk Level ---
     let overallRiskLevel = "DANGER";
     if (report.risks && report.risks.length > 0) {
       const riskLevels = report.risks.map((r) => r.level.toUpperCase());
-      if (riskLevels.includes("DANGER")) {
-        overallRiskLevel = "DANGER";
-      } else if (riskLevels.includes("WARNING")) {
-        overallRiskLevel = "WARNING";
-      } else {
-        overallRiskLevel = "GOOD";
-      }
+      if (riskLevels.includes("DANGER")) overallRiskLevel = "DANGER";
+      else if (riskLevels.includes("WARN")) overallRiskLevel = "WARNING";
     }
 
     const summaryForPrompt = {
@@ -336,12 +304,6 @@ export async function checkRug(mintAddress) {
         "ERROR",
         `Error calling RugCheck API: Server responded with status ${error.response.status}`,
         { mint: mintAddress, data: error.response.data }
-      );
-    } else if (error.request) {
-      await logEvent(
-        "ERROR",
-        `Error calling RugCheck API: No response received`,
-        { mint: mintAddress }
       );
     } else {
       await logEvent("ERROR", `Error during vetting process`, {
