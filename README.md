@@ -5,6 +5,14 @@ Welcome! This is a professional-grade, automated trading bot for sniping new mem
 
 This bot leverages AI-powered analysis, sophisticated risk management, and dynamic trading strategies to navigate the fast-paced world of meme coin trading with the goal of maximizing profit while mitigating risk.
 
+## Demo
+
+https://github.com/user-attachments/assets/7408831d-59ed-4448-8422-82a980fe4c2c
+
+
+![WhatsApp Image 2025-07-15 at 6 12 42 PM](https://github.com/user-attachments/assets/545dcfb6-8749-4864-a80e-d3f03125d9e8)
+
+
 ## 🚀Features
 - AI-Powered Decisions: Uses the Google Gemini API to analyze token names and symbols for viral potential, providing an intelligent layer beyond simple metrics.
 
@@ -32,16 +40,6 @@ This bot leverages AI-powered analysis, sophisticated risk management, and dynam
    - Database Records: Logs every trade, fee, and system event to a local SQLite database.
   -  Live Console Output: Provides real-time, color-coded logs in the console.
   -  Total P&L Tracking: Calculates and displays your running total Profit/Loss in USD after every sell trade.
-
-
-
-## Demo
-
-https://github.com/user-attachments/assets/7408831d-59ed-4448-8422-82a980fe4c2c
-
-
-![WhatsApp Image 2025-07-15 at 6 12 42 PM](https://github.com/user-attachments/assets/545dcfb6-8749-4864-a80e-d3f03125d9e8)
-
 
 
 
