@@ -40,9 +40,22 @@ import {
   sendBuyNotification,
   sendSellNotification,
 } from "./telegramService.js";
+import {
+  startTrailingStopMonitor,
+  stopTrailingStopMonitor,
+  isBeingMonitored,
+} from "./realtimeTrailingStopService.js";
+import {
+  swapOnMeteora,
+  sellOnMeteora,
+  findMeteoraPool,
+  getMeteoraTokenPrice,
+} from "./meteoraSwapService.js";
 import fetch from "cross-fetch";
 
 const portfolio = new Map();
+// Track active monitors for cleanup
+const activeMonitors = new Map();
 let totalPnlUsd = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -58,8 +71,13 @@ export function getPortfolio() {
   return portfolio;
 }
 
-export async function buyToken(mintAddress, riskLevel, metadata) {
+export async function buyToken(mintAddress, riskLevel, metadata, poolAddress = null, dexSource = null) {
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
+  const maxRetries = 3;
+  const retryDelays = [0, 3000, 5000]; // Increasing delays for Jupiter indexing
+
+  // If this is a Meteora token, go directly to Meteora swap (skip Jupiter)
+  const isMeteoraDex = dexSource && dexSource.startsWith("meteora");
 
   const walletBalance = await connection.getBalance(WALLET_KEYPAIR.publicKey);
   if (walletBalance / LAMPORTS_PER_SOL < tradeAmountSol + MIN_SOL_BALANCE) {
@@ -73,89 +91,315 @@ export async function buyToken(mintAddress, riskLevel, metadata) {
   await logEvent(
     "INFO",
     `Attempting to buy ${mintAddress} for ${tradeAmountSol} SOL`,
-    { riskLevel },
+    { riskLevel, dexSource: dexSource || "jupiter" },
     totalPnlUsd
   );
-  try {
-    const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
-    const quoteResponse = await (
-      await fetch(
-        `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
-      )
-    ).json();
 
-    const { swapTransaction } = await (
-      await fetch("https://quote-api.jup.ag/v6/swap", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          quoteResponse,
-          userPublicKey: WALLET_KEYPAIR.publicKey.toString(),
-          wrapAndUnwrapSol: true,
-          dynamicComputeUnitLimit: true,
-          prioritizationFeeLamports: "auto",
-        }),
-      })
-    ).json();
+  // If Meteora DEX, use Meteora directly (skip Jupiter entirely)
+  if (isMeteoraDex) {
+    await logEvent("INFO", `Using Meteora direct swap for ${dexSource} token...`);
+    try {
+      const meteoraResult = await swapOnMeteora(mintAddress, tradeAmountSol, poolAddress);
 
-    if (!swapTransaction)
-      throw new Error("Failed to get swap transaction from Jupiter API.");
-
-    const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
-    const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-
-    const latestBlockhash = await connection.getLatestBlockhash();
-    const txResult = await sendAndConfirmTransaction(
-      transaction,
-      latestBlockhash
-    );
-    if (txResult) {
-      const purchasePrice = await getTokenPriceInSol(mintAddress);
-      if (purchasePrice > 0) {
+      if (meteoraResult) {
         const tokenAta = await getAssociatedTokenAddress(
           new PublicKey(mintAddress),
           WALLET_KEYPAIR.publicKey
         );
-        const balanceResponse = await connection.getTokenAccountBalance(
-          tokenAta
-        );
+
+        let tokenBalance = "0";
+        try {
+          const balanceResponse = await connection.getTokenAccountBalance(tokenAta);
+          tokenBalance = balanceResponse.value.amount;
+        } catch (balanceError) {
+          await logEvent("WARN", "Could not fetch token balance after Meteora swap");
+        }
+
+        // Calculate price from trade amount and tokens received
+        let purchasePrice = 0;
+        if (parseInt(tokenBalance) > 0) {
+          purchasePrice = tradeAmountSol / (parseInt(tokenBalance) / 1e9);
+        }
+        const finalPrice = purchasePrice > 0 ? purchasePrice : tradeAmountSol;
 
         portfolio.set(mintAddress, {
-          purchasePrice,
-          amount: balanceResponse.value.amount,
+          purchasePrice: finalPrice,
+          amount: tokenBalance,
           tradeAmountSol,
           riskLevel,
           profitTakenLevels: [],
           purchaseTimestamp: Date.now(),
-          highestPriceSeen: purchasePrice,
-          buySignature: txResult.signature,
+          highestPriceSeen: finalPrice,
+          buySignature: meteoraResult.signature,
+          dexSource: "meteora", // Track that this was bought on Meteora
         });
         await addPurchasedToken(mintAddress);
         await logTrade(
           "BUY",
           mintAddress,
           tradeAmountSol,
-          purchasePrice,
-          txResult.fee,
-          txResult.signature,
+          finalPrice,
+          meteoraResult.fee,
+          meteoraResult.signature,
           totalPnlUsd
         );
-        await sendBuyNotification(metadata, tradeAmountSol, txResult.signature);
+        await sendBuyNotification(metadata, tradeAmountSol, meteoraResult.signature);
+
+        const monitor = startTrailingStopMonitor(
+          mintAddress,
+          finalPrice,
+          riskLevel,
+          async (mint, currentPrice, reason) => {
+            await logEvent(
+              "WARN",
+              `Real-time ${reason} triggered for ${mint}. Executing sell.`,
+              { currentPrice, reason },
+              totalPnlUsd
+            );
+            await sellToken(mint, 100);
+          },
+          "meteora" // Pass dexSource for correct pricing
+        );
+        activeMonitors.set(mintAddress, monitor);
 
         await addToBlacklist(metadata.name, metadata.symbol);
+        await logEvent("SUCCESS", `Bought ${mintAddress} via Meteora!`);
         return true;
+      } else {
+        await logEvent("ERROR", `Meteora swap failed for ${mintAddress}`);
+        return false;
       }
+    } catch (meteoraError) {
+      await logEvent("ERROR", `Meteora buy failed`, { error: meteoraError.message });
+      return false;
     }
-    return false;
-  } catch (error) {
-    await logEvent(
-      "ERROR",
-      `Error buying token ${mintAddress}`,
-      { error: error.message },
-      totalPnlUsd
-    );
-    return false;
   }
+
+  // Retry loop for Jupiter quote/swap (for non-Meteora tokens)
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      if (attempt > 0) {
+        await logEvent("INFO", `Retry attempt ${attempt + 1}/${maxRetries} for ${mintAddress}...`);
+        await sleep(retryDelays[attempt]);
+      }
+
+      const amountInLamports = Math.round(tradeAmountSol * LAMPORTS_PER_SOL);
+      const quoteResponse = await (
+        await fetch(
+          `https://api.jup.ag/swap/v1/quote?inputMint=${SOL_MINT}&outputMint=${mintAddress}&amount=${amountInLamports}&slippageBps=${SLIPPAGE_BPS}`
+        )
+      ).json();
+
+      // Check if quote was successful
+      if (!quoteResponse || quoteResponse.error || !quoteResponse.outAmount) {
+        const errorMsg = quoteResponse?.error || "No route found";
+        if (attempt < maxRetries - 1) {
+          await logEvent("WARN", `Jupiter quote failed (attempt ${attempt + 1}): ${errorMsg}. Retrying...`);
+          continue;
+        }
+        throw new Error(`Jupiter quote failed: ${errorMsg}`);
+      }
+
+      const { swapTransaction } = await (
+        await fetch("https://api.jup.ag/swap/v1/swap", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            quoteResponse,
+            userPublicKey: WALLET_KEYPAIR.publicKey.toString(),
+            wrapAndUnwrapSol: true,
+            dynamicComputeUnitLimit: true,
+            prioritizationFeeLamports: "auto",
+          }),
+        })
+      ).json();
+
+      if (!swapTransaction) {
+        if (attempt < maxRetries - 1) {
+          await logEvent("WARN", `Jupiter swap failed (attempt ${attempt + 1}). Retrying...`);
+          continue;
+        }
+        throw new Error("Failed to get swap transaction from Jupiter API.");
+      }
+
+      const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
+      const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+
+      const latestBlockhash = await connection.getLatestBlockhash();
+      const txResult = await sendAndConfirmTransaction(
+        transaction,
+        latestBlockhash
+      );
+
+      if (txResult) {
+        const purchasePrice = await getTokenPriceInSol(mintAddress);
+        if (purchasePrice > 0) {
+          const tokenAta = await getAssociatedTokenAddress(
+            new PublicKey(mintAddress),
+            WALLET_KEYPAIR.publicKey
+          );
+          const balanceResponse = await connection.getTokenAccountBalance(
+            tokenAta
+          );
+
+          portfolio.set(mintAddress, {
+            purchasePrice,
+            amount: balanceResponse.value.amount,
+            tradeAmountSol,
+            riskLevel,
+            profitTakenLevels: [],
+            purchaseTimestamp: Date.now(),
+            highestPriceSeen: purchasePrice,
+            buySignature: txResult.signature,
+          });
+          await addPurchasedToken(mintAddress);
+          await logTrade(
+            "BUY",
+            mintAddress,
+            tradeAmountSol,
+            purchasePrice,
+            txResult.fee,
+            txResult.signature,
+            totalPnlUsd
+          );
+          await sendBuyNotification(metadata, tradeAmountSol, txResult.signature);
+
+          // Start real-time trailing stop-loss monitoring
+          const monitor = startTrailingStopMonitor(
+            mintAddress,
+            purchasePrice,
+            riskLevel,
+            async (mint, currentPrice, reason) => {
+              await logEvent(
+                "WARN",
+                `Real-time ${reason} triggered for ${mint}. Executing sell.`,
+                { currentPrice, reason },
+                totalPnlUsd
+              );
+              await sellToken(mint, 100);
+            }
+          );
+          activeMonitors.set(mintAddress, monitor);
+
+          await addToBlacklist(metadata.name, metadata.symbol);
+          return true;
+        }
+      }
+      return false;
+    } catch (error) {
+      // If this is the last retry, try Meteora direct swap as fallback
+      if (attempt === maxRetries - 1) {
+        await logEvent(
+          "WARN",
+          `Jupiter failed after ${maxRetries} attempts. Trying Meteora direct swap...`,
+          { error: error.message },
+          totalPnlUsd
+        );
+
+        // Try Meteora direct swap as fallback
+        try {
+          // Pass poolAddress if we have it from detection
+          const meteoraPool = await findMeteoraPool(mintAddress, poolAddress);
+          if (meteoraPool) {
+            await logEvent("INFO", "Found Meteora pool, attempting direct swap...", {
+              poolAddress: meteoraPool.poolAddress.toString()
+            });
+            const meteoraResult = await swapOnMeteora(mintAddress, tradeAmountSol, poolAddress);
+
+            if (meteoraResult) {
+              // Success via Meteora!
+              const tokenAta = await getAssociatedTokenAddress(
+                new PublicKey(mintAddress),
+                WALLET_KEYPAIR.publicKey
+              );
+
+              // Get token balance
+              let tokenBalance = "0";
+              try {
+                const balanceResponse = await connection.getTokenAccountBalance(tokenAta);
+                tokenBalance = balanceResponse.value.amount;
+              } catch (balanceError) {
+                await logEvent("WARN", "Could not fetch token balance after Meteora swap", {
+                  error: balanceError.message
+                });
+              }
+
+              // Try to get price, use fallback if API fails
+              let purchasePrice = await getTokenPriceInSol(mintAddress);
+              if (purchasePrice <= 0 && parseInt(tokenBalance) > 0) {
+                // Fallback: calculate price from trade amount and tokens received
+                purchasePrice = tradeAmountSol / (parseInt(tokenBalance) / 1e9);
+                await logEvent("INFO", "Using calculated price from swap", {
+                  calculatedPrice: purchasePrice
+                });
+              }
+
+              // Add to portfolio even if price is uncertain
+              const finalPrice = purchasePrice > 0 ? purchasePrice : tradeAmountSol; // Last resort fallback
+
+              portfolio.set(mintAddress, {
+                purchasePrice: finalPrice,
+                amount: tokenBalance,
+                tradeAmountSol,
+                riskLevel,
+                profitTakenLevels: [],
+                purchaseTimestamp: Date.now(),
+                highestPriceSeen: finalPrice,
+                buySignature: meteoraResult.signature,
+              });
+              await addPurchasedToken(mintAddress);
+              await logTrade(
+                "BUY",
+                mintAddress,
+                tradeAmountSol,
+                finalPrice,
+                meteoraResult.fee,
+                meteoraResult.signature,
+                totalPnlUsd
+              );
+              await sendBuyNotification(metadata, tradeAmountSol, meteoraResult.signature);
+
+              const monitor = startTrailingStopMonitor(
+                mintAddress,
+                finalPrice,
+                riskLevel,
+                async (mint, currentPrice, reason) => {
+                  await logEvent(
+                    "WARN",
+                    `Real-time ${reason} triggered for ${mint}. Executing sell.`,
+                    { currentPrice, reason },
+                    totalPnlUsd
+                  );
+                  await sellToken(mint, 100);
+                },
+                "meteora" // Pass dexSource for correct pricing
+              );
+              activeMonitors.set(mintAddress, monitor);
+
+              await addToBlacklist(metadata.name, metadata.symbol);
+              await logEvent("SUCCESS", `Bought ${mintAddress} via Meteora direct swap!`);
+              return true;
+            }
+          }
+        } catch (meteoraError) {
+          await logEvent("ERROR", "Meteora fallback also failed", {
+            error: meteoraError.message,
+          });
+        }
+
+        await logEvent(
+          "ERROR",
+          `Error buying token ${mintAddress} - all methods failed`,
+          { error: error.message },
+          totalPnlUsd
+        );
+        return false;
+      }
+      // Otherwise continue to next retry
+      await logEvent("WARN", `Buy attempt ${attempt + 1} failed: ${error.message}. Retrying...`);
+    }
+  }
+  return false;
 }
 
 export async function sellToken(mintAddress, sellPercentage) {
@@ -164,39 +408,122 @@ export async function sellToken(mintAddress, sellPercentage) {
   const position = portfolio.get(mintAddress);
   if (!position) return false;
 
+  // Check if this token was bought on Meteora - if so, sell on Meteora directly
+  const isMeteoraDex = position.dexSource === "meteora";
+
+  // Get on-chain balance first
+  const tokenAta = await getAssociatedTokenAddress(
+    new PublicKey(mintAddress),
+    WALLET_KEYPAIR.publicKey
+  );
+  let onChainBalance;
+  try {
+    const balanceResponse = await connection.getTokenAccountBalance(tokenAta);
+    onChainBalance = parseInt(balanceResponse.value.amount, 10);
+  } catch {
+    onChainBalance = 0;
+  }
+
+  if (isNaN(onChainBalance) || onChainBalance === 0) {
+    await logEvent(
+      "WARN",
+      `On-chain balance for ${mintAddress} is zero. Removing from portfolio.`,
+      null,
+      totalPnlUsd
+    );
+    portfolio.delete(mintAddress);
+    await updateTradeStatus(position.buySignature, "SOLD");
+    return false;
+  }
+
+  const amountToSell = Math.round((onChainBalance * sellPercentage) / 100);
+  if (amountToSell <= 0) return false;
+
+  // If Meteora token, sell directly on Meteora (skip Jupiter entirely)
+  if (isMeteoraDex) {
+    await logEvent(
+      "INFO",
+      `Selling ${sellPercentage}% of ${mintAddress} via Meteora (original DEX)`,
+      null,
+      totalPnlUsd
+    );
+
+    try {
+      const meteoraResult = await sellOnMeteora(mintAddress, amountToSell.toString());
+
+      if (meteoraResult) {
+        const sellPrice = position.purchasePrice || 0;
+        const receivedSol = meteoraResult.solReceived || 0;
+        const initialInvestment = position.tradeAmountSol * (sellPercentage / 100);
+        const profitInSol = receivedSol - initialInvestment;
+        const solPrice = await getSolPriceUsd();
+        let profitUsd = 0;
+        if (solPrice > 0) {
+          profitUsd = profitInSol * solPrice;
+          totalPnlUsd += profitUsd;
+        }
+
+        await logTrade(
+          "SELL",
+          mintAddress,
+          receivedSol,
+          sellPrice,
+          meteoraResult.fee,
+          meteoraResult.signature,
+          totalPnlUsd
+        );
+        await sendSellNotification(
+          mintAddress,
+          receivedSol,
+          profitUsd,
+          totalPnlUsd,
+          meteoraResult.signature
+        );
+
+        if (sellPercentage === 100) {
+          stopTrailingStopMonitor(mintAddress);
+          activeMonitors.delete(mintAddress);
+          portfolio.delete(mintAddress);
+          await updateTradeStatus(position.buySignature, "SOLD");
+          await closeTokenAccount(mintAddress);
+        } else {
+          position.amount = (onChainBalance - amountToSell).toString();
+        }
+
+        await logEvent("SUCCESS", `Sold ${mintAddress} via Meteora!`, {
+          solReceived: receivedSol,
+          profitUsd: profitUsd.toFixed(4)
+        });
+        return true;
+      } else {
+        await logEvent("ERROR", `Meteora sell failed for ${mintAddress}`);
+        await updateTradeStatus(position.buySignature, "SELL_FAILED");
+        return false;
+      }
+    } catch (meteoraError) {
+      await logEvent(
+        "ERROR",
+        `Meteora sell failed`,
+        { error: meteoraError.message },
+        totalPnlUsd
+      );
+      await updateTradeStatus(position.buySignature, "SELL_FAILED");
+      return false;
+    }
+  }
+
+  // Jupiter sell for non-Meteora tokens
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     await logEvent(
       "INFO",
-      `Attempt ${attempt}/${maxRetries} to sell ${sellPercentage}% of ${mintAddress}`,
+      `Attempt ${attempt}/${maxRetries} to sell ${sellPercentage}% of ${mintAddress} via Jupiter`,
       null,
       totalPnlUsd
     );
     try {
-      const tokenAta = await getAssociatedTokenAddress(
-        new PublicKey(mintAddress),
-        WALLET_KEYPAIR.publicKey
-      );
-      const balanceResponse = await connection.getTokenAccountBalance(tokenAta);
-      const onChainBalance = parseInt(balanceResponse.value.amount, 10);
-
-      if (isNaN(onChainBalance) || onChainBalance === 0) {
-        await logEvent(
-          "WARN",
-          `On-chain balance for ${mintAddress} is zero. Removing from portfolio.`,
-          null,
-          totalPnlUsd
-        );
-        portfolio.delete(mintAddress);
-        await updateTradeStatus(position.buySignature, "SOLD");
-        return false;
-      }
-
-      const amountToSell = Math.round((onChainBalance * sellPercentage) / 100);
-      if (amountToSell <= 0) return false;
-
       const quoteResponse = await (
         await fetch(
-          `https://quote-api.jup.ag/v6/quote?inputMint=${mintAddress}&outputMint=${SOL_MINT}&amount=${amountToSell}&slippageBps=${SLIPPAGE_BPS}`
+          `https://api.jup.ag/swap/v1/quote?inputMint=${mintAddress}&outputMint=${SOL_MINT}&amount=${amountToSell}&slippageBps=${SLIPPAGE_BPS}`
         )
       ).json();
       if (!quoteResponse || quoteResponse.error)
@@ -205,7 +532,7 @@ export async function sellToken(mintAddress, sellPercentage) {
         );
 
       const { swapTransaction } = await (
-        await fetch("https://quote-api.jup.ag/v6/swap", {
+        await fetch("https://api.jup.ag/swap/v1/swap", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -263,10 +590,12 @@ export async function sellToken(mintAddress, sellPercentage) {
         );
 
         if (sellPercentage === 100) {
+          stopTrailingStopMonitor(mintAddress);
+          activeMonitors.delete(mintAddress);
           portfolio.delete(mintAddress);
           await updateTradeStatus(position.buySignature, "SOLD");
           await closeTokenAccount(mintAddress);
-        } else if (position) {
+        } else {
           position.amount = (onChainBalance - amountToSell).toString();
         }
         return true;
@@ -274,7 +603,7 @@ export async function sellToken(mintAddress, sellPercentage) {
     } catch (error) {
       await logEvent(
         "ERROR",
-        `Error on sell attempt ${attempt}`,
+        `Error on Jupiter sell attempt ${attempt}`,
         { error: error.message },
         totalPnlUsd
       );
@@ -282,9 +611,73 @@ export async function sellToken(mintAddress, sellPercentage) {
     if (attempt < maxRetries) await sleep(retryDelay);
   }
 
+  // Jupiter failed - try Meteora as fallback
+  await logEvent(
+    "WARN",
+    `Jupiter sell failed. Trying Meteora as fallback...`,
+    null,
+    totalPnlUsd
+  );
+
+  try {
+    const meteoraResult = await sellOnMeteora(mintAddress, amountToSell.toString());
+
+    if (meteoraResult) {
+      const sellPrice = position.purchasePrice || 0;
+      const receivedSol = meteoraResult.solReceived || 0;
+      const initialInvestment = position.tradeAmountSol * (sellPercentage / 100);
+      const profitInSol = receivedSol - initialInvestment;
+      const solPrice = await getSolPriceUsd();
+      let profitUsd = 0;
+      if (solPrice > 0) {
+        profitUsd = profitInSol * solPrice;
+        totalPnlUsd += profitUsd;
+      }
+
+      await logTrade(
+        "SELL",
+        mintAddress,
+        receivedSol,
+        sellPrice,
+        meteoraResult.fee,
+        meteoraResult.signature,
+        totalPnlUsd
+      );
+      await sendSellNotification(
+        mintAddress,
+        receivedSol,
+        profitUsd,
+        totalPnlUsd,
+        meteoraResult.signature
+      );
+
+      if (sellPercentage === 100) {
+        stopTrailingStopMonitor(mintAddress);
+        activeMonitors.delete(mintAddress);
+        portfolio.delete(mintAddress);
+        await updateTradeStatus(position.buySignature, "SOLD");
+        await closeTokenAccount(mintAddress);
+      } else {
+        position.amount = (onChainBalance - amountToSell).toString();
+      }
+
+      await logEvent("SUCCESS", `Sold ${mintAddress} via Meteora fallback!`, {
+        solReceived: receivedSol
+      });
+      return true;
+    }
+  } catch (meteoraError) {
+    await logEvent(
+      "ERROR",
+      `Meteora fallback also failed`,
+      { error: meteoraError.message },
+      totalPnlUsd
+    );
+  }
+
   await logEvent(
     "ERROR",
-    `Failed to sell ${mintAddress} after ${maxRetries} attempts.`,
+    `Failed to sell ${mintAddress} after all attempts (Jupiter + Meteora).`,
     null,
     totalPnlUsd
   );
@@ -410,11 +803,46 @@ async function handleDangerRisk(pnlPercentage, mintAddress) {
 export async function monitorPortfolio() {
   if (portfolio.size === 0) return;
   for (const [mintAddress, position] of portfolio.entries()) {
-    const currentPrice = await getTokenPriceInSol(mintAddress);
+    // Try to get price - try Jupiter first, then Meteora as fallback
+    let currentPrice = 0;
+    const isMeteoraDex = position.dexSource === "meteora";
+
+    if (isMeteoraDex) {
+      // Meteora token - use Meteora pricing
+      currentPrice = await getMeteoraTokenPrice(mintAddress);
+    } else {
+      // Try Jupiter first
+      currentPrice = await getTokenPriceInSol(mintAddress);
+
+      // If Jupiter fails, try Meteora (token might be on Meteora but dexSource not set)
+      if (currentPrice === 0) {
+        currentPrice = await getMeteoraTokenPrice(mintAddress);
+        if (currentPrice > 0) {
+          // Update dexSource since we found it on Meteora
+          position.dexSource = "meteora";
+        }
+      }
+    }
+
+    // If price is still 0, check how long we've held the token
     if (currentPrice === 0 && portfolio.has(mintAddress)) {
+      const timeHeldMinutes = (Date.now() - position.purchaseTimestamp) / 60000;
+
+      // Give new tokens 5 minutes grace period
+      if (timeHeldMinutes < 5) {
+        await logEvent(
+          "INFO",
+          `Price unavailable for ${mintAddress.slice(0, 8)}... (held ${timeHeldMinutes.toFixed(1)} min). Waiting for pool indexing.`,
+          null,
+          totalPnlUsd
+        );
+        continue;
+      }
+
+      // After 5 minutes with no price, try to sell anyway
       await logEvent(
         "WARN",
-        `Price for ${mintAddress} is zero. Selling 100%.`,
+        `Price for ${mintAddress} is zero after ${timeHeldMinutes.toFixed(1)} min. Attempting to sell 100%.`,
         null,
         totalPnlUsd
       );
@@ -442,10 +870,12 @@ export async function monitorPortfolio() {
       totalPnlUsd
     );
 
-    if (pnlPercentage > 0 && dropFromPeak >= TRAILING_STOP_LOSS_PERCENT) {
+    // NOTE: Trailing stop-loss is now handled in real-time by realtimeTrailingStopService
+    // This is a backup check in case real-time monitoring missed it
+    if (!isBeingMonitored(mintAddress) && pnlPercentage > 0 && dropFromPeak >= TRAILING_STOP_LOSS_PERCENT) {
       await logEvent(
         "WARN",
-        `Trailing Stop Loss triggered. Selling 100%.`,
+        `Backup Trailing Stop Loss triggered (real-time monitor inactive). Selling 100%.`,
         { pnl: pnlPercentage, dropFromPeak },
         totalPnlUsd
       );
@@ -453,6 +883,7 @@ export async function monitorPortfolio() {
       continue;
     }
 
+    // Hard stop-loss backup check (also handled in real-time)
     if (pnlPercentage <= -10) {
       await logEvent(
         "WARN",
@@ -507,4 +938,48 @@ export async function monitorPortfolio() {
         break;
     }
   }
+}
+
+/**
+ * Start real-time monitoring for a position (used for restored trades)
+ */
+export function startRealtimeMonitorForPosition(mintAddress) {
+  const position = portfolio.get(mintAddress);
+  if (!position) return;
+
+  // Skip if already being monitored
+  if (isBeingMonitored(mintAddress)) return;
+
+  const monitor = startTrailingStopMonitor(
+    mintAddress,
+    position.purchasePrice,
+    position.riskLevel || "DANGER",
+    async (mint, currentPrice, reason) => {
+      await logEvent(
+        "WARN",
+        `Real-time ${reason} triggered for ${mint}. Executing sell.`,
+        { currentPrice, reason },
+        totalPnlUsd
+      );
+      await sellToken(mint, 100);
+    },
+    position.dexSource || null // Pass dexSource if available
+  );
+  activeMonitors.set(mintAddress, monitor);
+}
+
+/**
+ * Start real-time monitoring for all positions in portfolio
+ */
+export function startRealtimeMonitoringForAllPositions() {
+  for (const mintAddress of portfolio.keys()) {
+    startRealtimeMonitorForPosition(mintAddress);
+  }
+}
+
+/**
+ * Get active monitors map (for debugging)
+ */
+export function getActiveMonitors() {
+  return activeMonitors;
 }

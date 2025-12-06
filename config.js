@@ -60,7 +60,7 @@ export const TRAILING_STOP_LOSS_PERCENT = parseFloat(
   loadEnvVariable("TRAILING_STOP_LOSS_PERCENT")
 );
 
-export const HELIUS_API_KEY = parseFloat(loadEnvVariable("HELIUS_API_KEY"));
+export const HELIUS_API_KEY = loadEnvVariable("HELIUS_API_KEY");
 
 export const STALE_DANGER_COIN_MINUTES = parseInt(
   loadEnvVariable("STALE_DANGER_COIN_MINUTES"),
@@ -80,6 +80,12 @@ export const DEEP_LOSS_PERCENT_DANGER = parseFloat(
 
 export const GLOBAL_STOP_LOSS_USD = parseFloat(
   loadEnvVariable("GLOBAL_STOP_LOSS_USD")
+);
+
+// Real-time Price Monitoring (default 2 seconds)
+export const REALTIME_PRICE_POLL_INTERVAL_MS = parseInt(
+  process.env.REALTIME_PRICE_POLL_INTERVAL_MS || "2000",
+  10
 );
 
 // Take Profit Strategies
@@ -124,3 +130,24 @@ export const MAX_DEV_WALLET_COUNT = parseInt(
 export const MAX_INITIAL_DEV_SELL_PERCENT = parseFloat(
   loadEnvVariable("MAX_INITIAL_DEV_SELL_PERCENT")
 );
+
+// Multi-RPC Configuration (comma-separated list of RPC URLs)
+// Primary RPC is required, additional RPCs are optional for redundancy
+export const ADDITIONAL_RPC_URLS = process.env.ADDITIONAL_RPC_URLS
+  ? process.env.ADDITIONAL_RPC_URLS.split(",").map((url) => url.trim())
+  : [];
+
+// Webhook Configuration
+export const WEBHOOK_ENABLED = process.env.WEBHOOK_ENABLED === "true";
+export const WEBHOOK_URL = process.env.WEBHOOK_URL || null;
+export const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
+
+// Detection Mode: "hybrid" (webhook + onLogs), "webhook", "onlogs", "multi-rpc"
+export const DETECTION_MODE = process.env.DETECTION_MODE || "multi-rpc";
+
+// DEX Monitoring Configuration
+// Which DEXes to monitor for new pools (comma-separated)
+// Options: "raydium", "meteora-dlmm", "meteora-damm-v2", "meteora-damm-v1", "meteora-dbc"
+export const MONITORED_DEXES = process.env.MONITORED_DEXES
+  ? process.env.MONITORED_DEXES.split(",").map((d) => d.trim().toLowerCase())
+  : ["raydium", "meteora-dlmm", "meteora-damm-v2"];

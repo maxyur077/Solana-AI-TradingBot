@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(node --check:*)",
+      "Bash(cat:*)",
+      "Bash(ping:*)",
+      "Bash(nslookup:*)",
+      "Bash(powershell:*)",
+      "WebSearch",
+      "WebFetch(domain:dev.jup.ag)",
+      "WebFetch(domain:www.helius.dev)",
+      "WebFetch(domain:solana.stackexchange.com)",
+      "WebFetch(domain:docs.helius.dev)",
+      "WebFetch(domain:docs.meteora.ag)",
+      "Bash(npm install:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(findstr:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

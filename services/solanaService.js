@@ -55,28 +55,38 @@ export async function sendAndConfirmTransaction(tx, latestBlockhash) {
 }
 
 export async function getTokenPriceInSol(mintAddress) {
-  try {
-    const url = `https://quote-api.jup.ag/v6/price?ids=${mintAddress}&vsToken=${SOL_MINT}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch price from Jupiter API: ${response.statusText}`
-      );
-    }
-    const data = await response.json();
-    const price = data.data[mintAddress]?.price;
+  // Try multiple price sources with retry
+  const maxRetries = 2;
 
-    if (price) {
-      return price;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Method 1: Jupiter Price API v2
+      const url = `https://api.jup.ag/price/v2?ids=${mintAddress}&vsToken=${SOL_MINT}`;
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const price = data.data?.[mintAddress]?.price;
+        if (price && price > 0) {
+          return price;
+        }
+      }
+
+      // Small delay before retry
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch (error) {
+      // Continue to next attempt
     }
-    return 0;
-  } catch (error) {
-    await logEvent(
-      "WARN",
-      `Could not fetch price for ${mintAddress}: ${error.message}`
-    );
-    return 0;
   }
+
+  // Don't log warning for every failed price fetch to reduce spam
+  return 0;
 }
 
 /**
@@ -84,21 +94,53 @@ export async function getTokenPriceInSol(mintAddress) {
  * @returns {Promise<number>}
  */
 export async function getSolPriceUsd() {
-  try {
-    const response = await fetch(
-      `https://lite-api.jup.ag/price/v2?ids=${SOL_MINT}`
-    );
-    const data = await response.json();
+  const maxRetries = 3;
 
-    if (data && data.data && data.data[SOL_MINT]) {
-      return parseFloat(data.data[SOL_MINT].price);
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Method 1: Jupiter Price API v2
+      const response = await fetch(
+        `https://api.jup.ag/price/v2?ids=${SOL_MINT}`,
+        {
+          headers: { 'Accept': 'application/json' },
+        }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.data && data.data[SOL_MINT] && data.data[SOL_MINT].price) {
+          return parseFloat(data.data[SOL_MINT].price);
+        }
+      }
+
+      // Small delay before retry
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch (error) {
+      // Continue to next attempt
     }
-    throw new Error("Invalid response from price API");
-  } catch (error) {
-    // Assuming logEvent is defined elsewhere in your project
-    await logEvent("ERROR", "Failed to fetch SOL price in USD", {
-      error: error.message,
-    });
-    return 0; // Return 0 as a safe fallback
   }
+
+  // Fallback: Try CoinGecko API
+  try {
+    const cgResponse = await fetch(
+      'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+      {
+        headers: { 'Accept': 'application/json' },
+      }
+    );
+
+    if (cgResponse.ok) {
+      const cgData = await cgResponse.json();
+      if (cgData && cgData.solana && cgData.solana.usd) {
+        return parseFloat(cgData.solana.usd);
+      }
+    }
+  } catch (error) {
+    // CoinGecko also failed
+  }
+
+  // Don't spam logs, just return 0
+  return 0;
 }
