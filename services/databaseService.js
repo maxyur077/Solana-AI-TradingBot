@@ -14,7 +14,8 @@ const TRADE_TABLE_SCHEMA = `
         token_price_in_sol REAL NOT NULL,
         transaction_fee_sol REAL,
         signature TEXT,
-        status TEXT NOT NULL DEFAULT 'BOUGHT' -- BOUGHT, SOLD, SELL_FAILED
+        status TEXT NOT NULL DEFAULT 'BOUGHT',
+        dex_source TEXT
     );
 `;
 
@@ -44,13 +45,15 @@ export async function initDb() {
     await db.exec(PURCHASED_TOKENS_SCHEMA);
 
     const tradesInfo = await db.all("PRAGMA table_info(trades);");
+
     if (!tradesInfo.some((col) => col.name === "transaction_fee_sol")) {
       await db.exec("ALTER TABLE trades ADD COLUMN transaction_fee_sol REAL;");
     }
     if (!tradesInfo.some((col) => col.name === "status")) {
-      await db.exec(
-        "ALTER TABLE trades ADD COLUMN status TEXT NOT NULL DEFAULT 'BOUGHT';"
-      );
+      await db.exec("ALTER TABLE trades ADD COLUMN status TEXT NOT NULL DEFAULT 'BOUGHT';");
+    }
+    if (!tradesInfo.some((col) => col.name === "dex_source")) {
+      await db.exec("ALTER TABLE trades ADD COLUMN dex_source TEXT;");
     }
 
     const logsInfo = await db.all("PRAGMA table_info(app_logs);");
@@ -65,14 +68,8 @@ export async function initDb() {
   }
 }
 
-export async function logEvent(
-  level,
-  message,
-  details = null,
-  totalPnlUsd = null
-) {
-  const pnlString =
-    totalPnlUsd !== null ? ` | Total PnL: $${totalPnlUsd.toFixed(4)}` : "";
+export async function logEvent(level, message, details = null, totalPnlUsd = null) {
+  const pnlString = totalPnlUsd !== null ? ` | Total PnL: $${totalPnlUsd.toFixed(4)}` : "";
   const detailsString = details ? `\n${JSON.stringify(details, null, 2)}` : "";
 
   switch (level) {
@@ -80,22 +77,13 @@ export async function logEvent(
       console.log(chalk.cyan(`[INFO] ${message}${pnlString}`), detailsString);
       break;
     case "SUCCESS":
-      console.log(
-        chalk.green.bold(`[SUCCESS] ${message}${pnlString}`),
-        detailsString
-      );
+      console.log(chalk.green.bold(`[SUCCESS] ${message}${pnlString}`), detailsString);
       break;
     case "WARN":
-      console.log(
-        chalk.yellow.bold(`[WARN] ${message}${pnlString}`),
-        detailsString
-      );
+      console.log(chalk.yellow.bold(`[WARN] ${message}${pnlString}`), detailsString);
       break;
     case "ERROR":
-      console.log(
-        chalk.red.bold(`[ERROR] ${message}${pnlString}`),
-        detailsString
-      );
+      console.log(chalk.red.bold(`[ERROR] ${message}${pnlString}`), detailsString);
       break;
     default:
       console.log(`[${level}] ${message}${pnlString}`, detailsString);
@@ -116,27 +104,14 @@ export async function logEvent(
   }
 }
 
-export async function logTrade(
-  tradeType,
-  mint,
-  solAmount,
-  price,
-  fee,
-  signature,
-  totalPnlUsd
-) {
+export async function logTrade(tradeType, mint, solAmount, price, fee, signature, totalPnlUsd, dexSource = null) {
   try {
     const status = tradeType === "BUY" ? "BOUGHT" : "SOLD";
     await db.run(
-      "INSERT INTO trades (trade_type, mint_address, sol_amount, token_price_in_sol, transaction_fee_sol, signature, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [tradeType, mint, solAmount, price, fee, signature, status]
+      "INSERT INTO trades (trade_type, mint_address, sol_amount, token_price_in_sol, transaction_fee_sol, signature, status, dex_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [tradeType, mint, solAmount, price, fee, signature, status, dexSource]
     );
-    await logEvent(
-      "SUCCESS",
-      `Logged ${tradeType} trade for mint ${mint}`,
-      { fee: `${fee} SOL` },
-      totalPnlUsd
-    );
+    await logEvent("SUCCESS", `Logged ${tradeType} trade for mint ${mint}`, { fee: `${fee} SOL`, dex: dexSource }, totalPnlUsd);
   } catch (error) {
     console.error("Failed to write to trades table:", error);
   }
@@ -144,16 +119,10 @@ export async function logTrade(
 
 export async function updateTradeStatus(signature, status) {
   try {
-    await db.run("UPDATE trades SET status = ? WHERE signature = ?", [
-      status,
-      signature,
-    ]);
+    await db.run("UPDATE trades SET status = ? WHERE signature = ?", [status, signature]);
     await logEvent("INFO", `Updated trade status to ${status}`, { signature });
   } catch (error) {
-    await logEvent("ERROR", "Failed to update trade status", {
-      error,
-      signature,
-    });
+    await logEvent("ERROR", "Failed to update trade status", { error: error.message, signature });
   }
 }
 
@@ -164,41 +133,50 @@ export async function loadActiveTrades() {
     );
     return activeTrades;
   } catch (error) {
-    await logEvent("ERROR", "Failed to load active trades from database", {
-      error,
-    });
+    await logEvent("ERROR", "Failed to load active trades from database", { error: error.message });
     return [];
   }
 }
 
 export async function addPurchasedToken(mintAddress) {
   try {
-    await db.run(
-      "INSERT OR IGNORE INTO purchased_tokens (mint_address) VALUES (?)",
-      [mintAddress]
-    );
+    await db.run("INSERT OR IGNORE INTO purchased_tokens (mint_address) VALUES (?)", [mintAddress]);
   } catch (error) {
-    await logEvent(
-      "ERROR",
-      `Failed to add ${mintAddress} to purchased_tokens table`,
-      { error }
-    );
+    await logEvent("ERROR", `Failed to add ${mintAddress} to purchased_tokens table`, { error: error.message });
   }
 }
 
 export async function hasBeenPurchased(mintAddress) {
   try {
-    const row = await db.get(
-      "SELECT 1 FROM purchased_tokens WHERE mint_address = ?",
-      [mintAddress]
-    );
+    const row = await db.get("SELECT 1 FROM purchased_tokens WHERE mint_address = ?", [mintAddress]);
     return !!row;
   } catch (error) {
-    await logEvent(
-      "ERROR",
-      `Failed to check purchased status for ${mintAddress}`,
-      { error }
-    );
+    await logEvent("ERROR", `Failed to check purchased status for ${mintAddress}`, { error: error.message });
     return false;
+  }
+}
+
+export async function getTradeBySignature(signature) {
+  try {
+    return await db.get("SELECT * FROM trades WHERE signature = ?", [signature]);
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function getTotalTrades() {
+  try {
+    const result = await db.get("SELECT COUNT(*) as count FROM trades");
+    return result?.count || 0;
+  } catch (error) {
+    return 0;
+  }
+}
+
+export async function getRecentTrades(limit = 10) {
+  try {
+    return await db.all("SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?", [limit]);
+  } catch (error) {
+    return [];
   }
 }

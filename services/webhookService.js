@@ -1,7 +1,7 @@
 import express from "express";
 import { logEvent } from "./databaseService.js";
+import { SOL_MINT, RAYDIUM_AMM_PROGRAM } from "../utils/constants.js";
 
-// Store callbacks for new pool detection
 let onNewPoolCallback = null;
 const processedSignatures = new Set();
 const MAX_SIGNATURES_CACHE = 10000;
@@ -46,21 +46,19 @@ export function markSignatureProcessed(signature) {
  */
 function extractMintFromWebhook(transaction) {
   try {
-    // Method 1: Check tokenTransfers
     if (transaction.tokenTransfers && transaction.tokenTransfers.length > 0) {
       for (const transfer of transaction.tokenTransfers) {
-        if (transfer.mint && transfer.mint !== "So11111111111111111111111111111111111111112") {
+        if (transfer.mint && transfer.mint !== SOL_MINT) {
           return transfer.mint;
         }
       }
     }
 
-    // Method 2: Check accountData for new token mints
     if (transaction.accountData) {
       for (const account of transaction.accountData) {
         if (account.tokenBalanceChanges) {
           for (const change of account.tokenBalanceChanges) {
-            if (change.mint && change.mint !== "So11111111111111111111111111111111111111112") {
+            if (change.mint && change.mint !== SOL_MINT) {
               return change.mint;
             }
           }
@@ -68,18 +66,12 @@ function extractMintFromWebhook(transaction) {
       }
     }
 
-    // Method 3: Check instructions for token program interactions
     if (transaction.instructions) {
       for (const ix of transaction.instructions) {
-        // Look for Raydium pool initialization
-        if (ix.programId === "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8") {
-          // Token mint is usually in the accounts
+        if (ix.programId === RAYDIUM_AMM_PROGRAM) {
           if (ix.accounts && ix.accounts.length > 8) {
-            // In Raydium AMM, token mints are typically at specific positions
             for (const account of ix.accounts) {
-              if (account !== "So11111111111111111111111111111111111111112" &&
-                  account !== "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8") {
-                // Validate it looks like a mint (44 chars, base58)
+              if (account !== SOL_MINT && account !== RAYDIUM_AMM_PROGRAM) {
                 if (account && account.length >= 32 && account.length <= 44) {
                   return account;
                 }
@@ -199,7 +191,7 @@ export async function createHeliusWebhook(apiKey, webhookUrl) {
         body: JSON.stringify({
           webhookURL: webhookUrl,
           transactionTypes: ["ANY"],
-          accountAddresses: ["675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"],
+          accountAddresses: [RAYDIUM_AMM_PROGRAM],
           webhookType: "enhanced",
         }),
       }

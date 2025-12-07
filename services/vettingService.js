@@ -2,23 +2,26 @@ import axios from "axios";
 import { logEvent } from "./databaseService.js";
 import {
   RPC_URL,
-  HELIUS_API_KEY, // Make sure you have HELIUS_API_KEY in your config
+  HELIUS_API_KEY,
   MAX_HOLDER_CONCENTRATION_PERCENT,
   MIN_LIQUIDITY_USD,
   MAX_LIQUIDITY_USD,
   MIN_MARKET_CAP_USD,
-  MAX_DEV_WALLET_COUNT,
   MAX_INITIAL_DEV_SELL_PERCENT,
+  MIN_LP_LOCKED_PERCENT,
+  MIN_POOL_AGE_SECONDS,
+  MAX_TOKEN_AGE_MINUTES,
+  MAX_TOP_HOLDER_PERCENT,
+  REQUIRE_VERIFIED_TOKEN,
 } from "../config.js";
 import { connection } from "./solanaService.js";
 import { PublicKey } from "@solana/web3.js";
 import fetch from "cross-fetch";
+import { RISK_LEVELS } from "../utils/constants.js";
 
-/**
- * Fetches basic token metadata (name and symbol) from the RPC.
- * @param {string} mintAddress - The token's mint address.
- * @returns {Promise<object|null>}
- */
+// Cache for known ruggers to avoid repeated checks
+const knownRuggersCache = new Map(); // walletAddress -> { isRugger: boolean, tokens: [], checkedAt: timestamp }
+
 export async function getTokenMetadata(mintAddress) {
   try {
     const response = await fetch(RPC_URL, {
@@ -44,17 +47,12 @@ export async function getTokenMetadata(mintAddress) {
     await logEvent(
       "ERROR",
       `Error fetching token metadata for ${mintAddress}`,
-      { error }
+      { error: error.message }
     );
     return null;
   }
 }
 
-/**
- * Fetches the creator's address using the Helius DAS API as a reliable source.
- * @param {string} mintAddress - The token's mint address.
- * @returns {Promise<string|null>} The creator's address or null if not found.
- */
 async function getCreatorFromHelius(mintAddress) {
   if (!HELIUS_API_KEY) {
     await logEvent(
@@ -105,78 +103,165 @@ async function getCreatorFromHelius(mintAddress) {
 }
 
 /**
- * A helper function to detect if the creator sold a significant amount of tokens early on.
- * @param {string} creatorAddress - The creator's wallet address.
- * @param {string} mintAddress - The token's mint address.
- * @returns {Promise<boolean>} - True if a significant early sell is detected, false otherwise.
+ * Check if creator is a SERIAL RUGGER by analyzing their past tokens
+ *
+ * IMPORTANT: Only counts as a "rug" if they dumped within 10 MINUTES of token creation
+ * Selling after hours/days is normal profit-taking, not a quick rug
+ *
+ * This function:
+ * 1. Gets all tokens the creator has interacted with
+ * 2. For each token, finds when it was created
+ * 3. Checks if creator dumped >80% within 10 min of creation
+ * 4. Flags as serial rugger if 2+ quick rugs found
  */
-async function detectEarlyDevSell(creatorAddress, mintAddress) {
+async function checkSerialRugger(creatorAddress, currentMint) {
+  const CACHE_DURATION_MS = 5 * 60 * 1000; // Cache for 5 minutes
+  const QUICK_RUG_WINDOW_SECONDS = 600; // 10 minutes - if sold within this time = quick rug
+  const MIN_DUMP_PERCENT = 80; // Must sell >80% to count as rug
+
+  // Check cache first
+  const cached = knownRuggersCache.get(creatorAddress);
+  if (cached && Date.now() - cached.checkedAt < CACHE_DURATION_MS) {
+    if (cached.isRugger) {
+      await logEvent("WARN", `Creator is KNOWN SERIAL RUGGER (cached)`, {
+        creator: creatorAddress,
+        previousRugs: cached.ruggedTokens?.length || 0,
+      });
+    }
+    return cached.isRugger;
+  }
+
   try {
     const creatorPubKey = new PublicKey(creatorAddress);
-    const mintPubKey = new PublicKey(mintAddress);
-    const creatorTokenAccounts = await connection.getParsedTokenAccountsByOwner(
-      creatorPubKey,
-      { mint: mintPubKey }
-    );
-    if (creatorTokenAccounts.value.length === 0) {
-      await logEvent(
-        "INFO",
-        `Creator ${creatorAddress} has no token account for mint ${mintAddress}. No early sell detected.`
-      );
-      return false;
-    }
-    const initialBalance = parseInt(
-      creatorTokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount,
-      10
-    );
-    if (initialBalance === 0) {
-      await logEvent(
-        "INFO",
-        `Creator's initial balance is 0. No early sell detected.`
-      );
-      return false;
-    }
+
+    // Get creator's recent transaction history (last 100 transactions)
     const signatures = await connection.getSignaturesForAddress(creatorPubKey, {
-      limit: 25,
+      limit: 100,
     });
-    if (!signatures || signatures.length === 0) return false;
-    const fiveMinutesAgo = Date.now() / 1000 - 300;
-    for (const tx of signatures) {
-      if (tx.blockTime < fiveMinutesAgo) continue;
-      const parsedTx = await connection.getParsedTransaction(tx.signature, {
-        maxSupportedTransactionVersion: 0,
-      });
-      if (!parsedTx || !parsedTx.meta) continue;
-      const preBalance = parsedTx.meta.preTokenBalances.find(
-        (b) => b.owner === creatorAddress && b.mint === mintAddress
-      );
-      const postBalance = parsedTx.meta.postTokenBalances.find(
-        (b) => b.owner === creatorAddress && b.mint === mintAddress
-      );
-      if (preBalance && postBalance) {
-        const soldAmount =
-          parseInt(preBalance.uiTokenAmount.amount, 10) -
-          parseInt(postBalance.uiTokenAmount.amount, 10);
-        if (soldAmount > 0) {
-          const soldPercentage = (soldAmount / initialBalance) * 100;
-          if (soldPercentage >= MAX_INITIAL_DEV_SELL_PERCENT) {
-            await logEvent(
-              "WARN",
-              `Vetting failed: Creator sold ${soldPercentage.toFixed(
-                2
-              )}% of initial tokens early.`,
-              { mint: mintAddress }
-            );
-            return true;
+
+    if (!signatures || signatures.length === 0) {
+      knownRuggersCache.set(creatorAddress, { isRugger: false, checkedAt: Date.now() });
+      return false;
+    }
+
+    // Find all unique tokens the creator has interacted with
+    // Track: mint -> { highestBalance, totalSold, firstSellTime, tokenCreationTime }
+    const tokenInteractions = new Map();
+
+    for (const sig of signatures) {
+      try {
+        const tx = await connection.getParsedTransaction(sig.signature, {
+          maxSupportedTransactionVersion: 0,
+        });
+
+        if (!tx || !tx.meta) continue;
+
+        const txTime = tx.blockTime || 0;
+
+        // Check token balance changes
+        const preBalances = tx.meta.preTokenBalances || [];
+        const postBalances = tx.meta.postTokenBalances || [];
+
+        for (const pre of preBalances) {
+          if (pre.owner !== creatorAddress) continue;
+          if (pre.mint === currentMint) continue; // Skip current token
+
+          const post = postBalances.find(p => p.owner === creatorAddress && p.mint === pre.mint);
+          const preAmount = parseInt(pre.uiTokenAmount?.amount || "0", 10);
+          const postAmount = post ? parseInt(post.uiTokenAmount?.amount || "0", 10) : 0;
+
+          if (preAmount > postAmount) {
+            // Creator sold this token
+            const soldAmount = preAmount - postAmount;
+
+            if (!tokenInteractions.has(pre.mint)) {
+              tokenInteractions.set(pre.mint, {
+                mint: pre.mint,
+                highestBalance: preAmount,
+                totalSold: soldAmount,
+                firstSellTime: txTime,
+                txCount: 1,
+              });
+            } else {
+              const existing = tokenInteractions.get(pre.mint);
+              existing.totalSold += soldAmount;
+              if (preAmount > existing.highestBalance) {
+                existing.highestBalance = preAmount;
+              }
+              // Track earliest sell time
+              if (txTime < existing.firstSellTime || !existing.firstSellTime) {
+                existing.firstSellTime = txTime;
+              }
+              existing.txCount++;
+            }
           }
         }
+      } catch (txError) {
+        continue;
       }
     }
+
+    // Now check each token: was it a QUICK rug (dumped within 10 min of creation)?
+    const quickRuggedTokens = [];
+
+    for (const [mint, data] of tokenInteractions) {
+      if (data.highestBalance <= 0 || data.totalSold <= 0) continue;
+
+      const soldPercent = (data.totalSold / data.highestBalance) * 100;
+
+      // Only check tokens where creator sold >80%
+      if (soldPercent < MIN_DUMP_PERCENT) continue;
+
+      try {
+        // Get token creation time
+        const mintPubKey = new PublicKey(mint);
+        const tokenSigs = await connection.getSignaturesForAddress(mintPubKey, { limit: 10 });
+
+        if (!tokenSigs || tokenSigs.length === 0) continue;
+
+        // Oldest transaction = creation time
+        const tokenCreationTime = tokenSigs[tokenSigs.length - 1].blockTime || 0;
+
+        if (!tokenCreationTime || !data.firstSellTime) continue;
+
+        // Check if first sell was within 10 minutes of creation
+        const timeBetweenCreateAndSell = data.firstSellTime - tokenCreationTime;
+
+        if (timeBetweenCreateAndSell <= QUICK_RUG_WINDOW_SECONDS) {
+          // This is a QUICK RUG - dumped within 10 min of creation!
+          quickRuggedTokens.push({
+            mint: mint.slice(0, 8) + "...",
+            soldPercent: soldPercent.toFixed(1) + "%",
+            dumpedAfterMinutes: (timeBetweenCreateAndSell / 60).toFixed(1),
+          });
+        }
+      } catch (mintErr) {
+        continue;
+      }
+    }
+
+    const isSerialRugger = quickRuggedTokens.length >= 2; // 2+ quick rugs = serial rugger
+
+    // Cache the result
+    knownRuggersCache.set(creatorAddress, {
+      isRugger: isSerialRugger,
+      ruggedTokens: quickRuggedTokens,
+      checkedAt: Date.now(),
+    });
+
+    // FAIL if creator has ANY previous quick-rug (even 1)
+    if (quickRuggedTokens.length >= 1) {
+      await logEvent("WARN", `RUGGER DETECTED! Creator quick-rugged ${quickRuggedTokens.length} token(s) within 10 min`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+        ruggedTokens: quickRuggedTokens,
+      });
+      return true;
+    }
+
     return false;
   } catch (error) {
-    await logEvent("ERROR", "Error detecting early dev sell", {
+    await logEvent("ERROR", "Error checking serial rugger", {
       error: error.message,
-      mint: mintAddress,
       creator: creatorAddress,
     });
     return false;
@@ -184,10 +269,548 @@ async function detectEarlyDevSell(creatorAddress, mintAddress) {
 }
 
 /**
- * Performs a comprehensive rug check on a token using the rugcheck.xyz API and Helius as a fallback.
- * @param {string} mintAddress - The token's mint address.
- * @returns {Promise<object|null>} - A summary object if all checks pass, otherwise null.
+ * Check if TOP HOLDERS are dumping within 10 minutes of token creation
+ * This catches coordinated dumps by insiders/snipers
  */
+async function checkTopHoldersDumping(report, mintAddress) {
+  const DUMP_THRESHOLD_PERCENT = 50; // If top holder sold > 50%
+
+  if (!report.topHolders || report.topHolders.length === 0) {
+    return { passed: true };
+  }
+
+  try {
+    const mintPubKey = new PublicKey(mintAddress);
+
+    // Get token creation time
+    const tokenSignatures = await connection.getSignaturesForAddress(mintPubKey, { limit: 50 });
+    if (!tokenSignatures || tokenSignatures.length === 0) {
+      return { passed: true };
+    }
+
+    const oldestTx = tokenSignatures[tokenSignatures.length - 1];
+    const tokenCreationTime = oldestTx.blockTime || 0;
+    const tokenAgeMinutes = (Date.now() / 1000 - tokenCreationTime) / 60;
+
+    // Only check if token is < 10 minutes old
+    if (tokenAgeMinutes > 10) {
+      return { passed: true, reason: "Token older than 10 minutes" };
+    }
+
+    const dumpingHolders = [];
+
+    // Check top 5 holders (excluding LP)
+    const topHolders = report.topHolders
+      .filter(h => !h.isLpToken && !h.isPool)
+      .slice(0, 5);
+
+    for (const holder of topHolders) {
+      if (!holder.address || holder.pct < 5) continue; // Skip small holders
+
+      try {
+        const holderPubKey = new PublicKey(holder.address);
+        const holderSigs = await connection.getSignaturesForAddress(holderPubKey, { limit: 30 });
+
+        let highestBalance = 0;
+        let totalSold = 0;
+
+        for (const sig of holderSigs) {
+          if (sig.blockTime && sig.blockTime < tokenCreationTime) continue;
+
+          try {
+            const tx = await connection.getParsedTransaction(sig.signature, {
+              maxSupportedTransactionVersion: 0,
+            });
+
+            if (!tx || !tx.meta) continue;
+
+            const pre = tx.meta.preTokenBalances?.find(
+              b => b.owner === holder.address && b.mint === mintAddress
+            );
+            const post = tx.meta.postTokenBalances?.find(
+              b => b.owner === holder.address && b.mint === mintAddress
+            );
+
+            if (pre && post) {
+              const preAmt = parseInt(pre.uiTokenAmount?.amount || "0", 10);
+              const postAmt = parseInt(post.uiTokenAmount?.amount || "0", 10);
+
+              if (preAmt > highestBalance) highestBalance = preAmt;
+              if (preAmt > postAmt) totalSold += (preAmt - postAmt);
+            }
+          } catch (txErr) {
+            continue;
+          }
+        }
+
+        if (highestBalance > 0) {
+          const soldPercent = (totalSold / highestBalance) * 100;
+          if (soldPercent >= DUMP_THRESHOLD_PERCENT) {
+            dumpingHolders.push({
+              address: holder.address.slice(0, 8) + "...",
+              holdingPercent: holder.pct.toFixed(1) + "%",
+              soldPercent: soldPercent.toFixed(1) + "%",
+            });
+          }
+        }
+      } catch (holderErr) {
+        continue;
+      }
+    }
+
+    if (dumpingHolders.length > 0) {
+      await logEvent("WARN", `TOP HOLDERS DUMPING within 10 min!`, {
+        mint: mintAddress,
+        tokenAgeMinutes: tokenAgeMinutes.toFixed(1),
+        dumpingHolders,
+      });
+      return {
+        passed: false,
+        reason: `${dumpingHolders.length} top holders dumping`,
+        dumpingHolders,
+      };
+    }
+
+    return { passed: true };
+  } catch (error) {
+    await logEvent("ERROR", "Error checking top holders dumping", {
+      error: error.message,
+      mint: mintAddress,
+    });
+    return { passed: true }; // Don't fail on error
+  }
+}
+
+/**
+ * Detect if creator dumped tokens within 10 minutes of coin creation
+ *
+ * Logic:
+ * - If coin is < 10 minutes old AND creator has sold ANY tokens → FAIL
+ * - If coin is >= 10 minutes old, use the normal threshold check
+ *
+ * This catches "quick rug" scammers who create, pump, and dump fast
+ */
+async function detectEarlyDevSell(creatorAddress, mintAddress) {
+  const EARLY_WINDOW_SECONDS = 600; // 10 minutes - critical early period
+  const MIN_SELL_PERCENT_TO_FAIL = parseFloat(MAX_INITIAL_DEV_SELL_PERCENT) || 10;
+
+  try {
+    const creatorPubKey = new PublicKey(creatorAddress);
+    const mintPubKey = new PublicKey(mintAddress);
+
+    // Get creator's token accounts for this mint
+    const creatorTokenAccounts = await connection.getParsedTokenAccountsByOwner(
+      creatorPubKey,
+      { mint: mintPubKey }
+    );
+
+    // Get current balance
+    let currentBalance = 0;
+    if (creatorTokenAccounts.value.length > 0) {
+      currentBalance = parseInt(
+        creatorTokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount,
+        10
+      );
+    }
+
+    // Fetch recent transactions to find token creation time and sells
+    const signatures = await connection.getSignaturesForAddress(mintPubKey, {
+      limit: 50,
+    });
+
+    if (!signatures || signatures.length === 0) {
+      await logEvent("INFO", `No transactions found for token.`, { mint: mintAddress });
+      return false;
+    }
+
+    // Find the oldest transaction (token creation time)
+    const oldestTx = signatures[signatures.length - 1];
+    const tokenCreationTime = oldestTx.blockTime || 0;
+    const nowSeconds = Date.now() / 1000;
+    const tokenAgeSeconds = nowSeconds - tokenCreationTime;
+    const tokenAgeMinutes = tokenAgeSeconds / 60;
+
+    const isWithinEarlyWindow = tokenAgeSeconds <= EARLY_WINDOW_SECONDS;
+
+    await logEvent("INFO", `Token age: ${tokenAgeMinutes.toFixed(1)} minutes`, {
+      mint: mintAddress,
+      createdAt: tokenCreationTime ? new Date(tokenCreationTime * 1000).toISOString() : "unknown",
+      isWithinEarlyWindow,
+    });
+
+    // Now check creator's transactions for sells
+    const creatorSignatures = await connection.getSignaturesForAddress(creatorPubKey, {
+      limit: 50,
+    });
+
+    let totalSold = 0;
+    let initialBalanceEstimate = currentBalance;
+    let sellTransactionsFound = 0;
+    let firstSellTime = null;
+
+    for (const tx of creatorSignatures) {
+      // Only check transactions after token was created
+      if (tx.blockTime && tx.blockTime < tokenCreationTime) continue;
+
+      try {
+        const parsedTx = await connection.getParsedTransaction(tx.signature, {
+          maxSupportedTransactionVersion: 0,
+        });
+
+        if (!parsedTx || !parsedTx.meta) continue;
+
+        // Find token balance changes for creator
+        const preBalance = parsedTx.meta.preTokenBalances?.find(
+          (b) => b.owner === creatorAddress && b.mint === mintAddress
+        );
+        const postBalance = parsedTx.meta.postTokenBalances?.find(
+          (b) => b.owner === creatorAddress && b.mint === mintAddress
+        );
+
+        if (preBalance && postBalance) {
+          const preBal = parseInt(preBalance.uiTokenAmount.amount, 10);
+          const postBal = parseInt(postBalance.uiTokenAmount.amount, 10);
+
+          // Track the highest balance we've seen (estimate of initial)
+          if (preBal > initialBalanceEstimate) {
+            initialBalanceEstimate = preBal;
+          }
+
+          // Check if this was a sell (balance decreased)
+          if (preBal > postBal) {
+            const soldAmount = preBal - postBal;
+            totalSold += soldAmount;
+            sellTransactionsFound++;
+
+            if (!firstSellTime) {
+              firstSellTime = tx.blockTime;
+            }
+          }
+        }
+      } catch (txError) {
+        continue;
+      }
+    }
+
+    // Calculate sold percentage
+    const soldPercentage = initialBalanceEstimate > 0
+      ? (totalSold / initialBalanceEstimate) * 100
+      : 0;
+
+    // KEY LOGIC: If within 10 minutes of creation and creator sold ANY amount → FAIL
+    if (isWithinEarlyWindow && totalSold > 0) {
+      const timeSinceCreation = firstSellTime ? (firstSellTime - tokenCreationTime) / 60 : 0;
+
+      await logEvent(
+        "WARN",
+        `Vetting FAILED: Creator sold ${soldPercentage.toFixed(2)}% within ${tokenAgeMinutes.toFixed(1)} min of creation!`,
+        {
+          mint: mintAddress,
+          tokenAgeMinutes: tokenAgeMinutes.toFixed(1),
+          soldPercentage: soldPercentage.toFixed(2) + "%",
+          sellTransactions: sellTransactionsFound,
+          firstSellAfterMinutes: timeSinceCreation.toFixed(1),
+        }
+      );
+      return true; // FAIL - early dump detected
+    }
+
+    // For older tokens, use threshold-based check
+    if (soldPercentage >= MIN_SELL_PERCENT_TO_FAIL) {
+      await logEvent(
+        "WARN",
+        `Vetting FAILED: Creator sold ${soldPercentage.toFixed(2)}% (threshold: ${MIN_SELL_PERCENT_TO_FAIL}%)`,
+        {
+          mint: mintAddress,
+          sellTransactions: sellTransactionsFound,
+        }
+      );
+      return true; // FAIL - too much sold
+    }
+
+    // Check if creator's current balance is 0 (already fully dumped)
+    if (currentBalance === 0 && initialBalanceEstimate > 0) {
+      await logEvent(
+        "WARN",
+        `Vetting FAILED: Creator has 0 balance - already fully dumped!`,
+        { mint: mintAddress }
+      );
+      return true; // FAIL - creator already rugged
+    }
+
+    await logEvent("INFO", `Creator sell check passed`, {
+      mint: mintAddress,
+      tokenAgeMinutes: tokenAgeMinutes.toFixed(1),
+      creatorBalance: currentBalance.toLocaleString(),
+      soldPercentage: soldPercentage.toFixed(2) + "%",
+    });
+
+    return false; // PASS - no early dump detected
+  } catch (error) {
+    await logEvent("ERROR", "Error detecting early dev sell", {
+      error: error.message,
+      mint: mintAddress,
+      creator: creatorAddress,
+    });
+    return false; // Don't fail vetting on error
+  }
+}
+
+/**
+ * Check for INSIDER wallets flagged by RugCheck
+ * Insiders often receive tokens through bundled transactions and dump quickly
+ */
+async function checkForInsiders(report, mintAddress) {
+  // Check graphInsidersDetected (RugCheck's graph analysis)
+  if (report.graphInsidersDetected && report.graphInsidersDetected > 0) {
+    return {
+      passed: false,
+      reason: `${report.graphInsidersDetected} insider wallet(s) detected by graph analysis`,
+      insiderCount: report.graphInsidersDetected,
+    };
+  }
+
+  // Check if any top holder is flagged as insider
+  if (report.topHolders && report.topHolders.length > 0) {
+    const insiderHolders = report.topHolders.filter((h) => h.insider === true);
+    if (insiderHolders.length > 0) {
+      return {
+        passed: false,
+        reason: `${insiderHolders.length} top holder(s) flagged as insiders`,
+        insiders: insiderHolders.map((h) => ({
+          address: h.address?.slice(0, 8) + "...",
+          pct: h.pct?.toFixed(2) + "%",
+        })),
+      };
+    }
+  }
+
+  return { passed: true };
+}
+
+/**
+ * Check total risk score from RugCheck
+ * High scores (>10000) indicate very dangerous tokens
+ */
+async function checkRiskScore(report, mintAddress) {
+  const MAX_ALLOWED_RISK_SCORE = 10000; // Tokens above this are too risky
+
+  // Calculate total risk score
+  let totalRiskScore = 0;
+  let dangerCount = 0;
+
+  if (report.risks && report.risks.length > 0) {
+    for (const risk of report.risks) {
+      totalRiskScore += risk.score || 0;
+      if (risk.level === "danger" || risk.level === "DANGER") {
+        dangerCount++;
+      }
+    }
+  }
+
+  // Fail if too many danger-level risks
+  if (dangerCount >= 3) {
+    return {
+      passed: false,
+      reason: `Too many danger risks: ${dangerCount} (max: 2)`,
+      dangerCount,
+      totalScore: totalRiskScore,
+    };
+  }
+
+  // Fail if total risk score is too high
+  if (totalRiskScore > MAX_ALLOWED_RISK_SCORE) {
+    return {
+      passed: false,
+      reason: `Risk score too high: ${totalRiskScore} (max: ${MAX_ALLOWED_RISK_SCORE})`,
+      totalScore: totalRiskScore,
+    };
+  }
+
+  await logEvent("INFO", `Risk score: ${totalRiskScore} (${dangerCount} danger risks)`, {
+    mint: mintAddress,
+  });
+
+  return { passed: true, totalScore: totalRiskScore, dangerCount };
+}
+
+/**
+ * Check if creator still holds too much (can rug instantly)
+ */
+async function checkCreatorBalance(report, mintAddress) {
+  const MAX_CREATOR_HOLDING_PERCENT = 30; // Creator should not hold >30%
+
+  if (!report.creator || !report.topHolders) {
+    return { passed: true };
+  }
+
+  const creatorAddress = report.creator.address || report.creator;
+  if (!creatorAddress) {
+    return { passed: true };
+  }
+
+  // Find creator in top holders
+  const creatorHolding = report.topHolders.find(
+    (h) => h.address === creatorAddress || h.owner === creatorAddress
+  );
+
+  if (creatorHolding) {
+    const creatorPct = creatorHolding.pct || 0;
+    if (creatorPct > MAX_CREATOR_HOLDING_PERCENT) {
+      return {
+        passed: false,
+        reason: `Creator holds ${creatorPct.toFixed(2)}% (max: ${MAX_CREATOR_HOLDING_PERCENT}%)`,
+        creatorPct,
+      };
+    }
+  }
+
+  return { passed: true };
+}
+
+async function checkTopHolderConcentration(report, mintAddress) {
+  if (!report.topHolders || report.topHolders.length === 0) {
+    return { passed: true };
+  }
+
+  const nonLpHolders = report.topHolders.filter(
+    (h) => !h.isLpToken && !h.isPool
+  );
+
+  for (const holder of nonLpHolders.slice(0, 10)) {
+    const holderPercent = holder.pct || 0;
+    if (holderPercent > MAX_TOP_HOLDER_PERCENT) {
+      return {
+        passed: false,
+        reason: `Top holder owns ${holderPercent.toFixed(
+          2
+        )}% (max: ${MAX_TOP_HOLDER_PERCENT}%)`,
+        holder: holder.address,
+        percent: holderPercent,
+      };
+    }
+  }
+
+  const top10TotalPercent = nonLpHolders
+    .slice(0, 10)
+    .reduce((sum, h) => sum + (h.pct || 0), 0);
+  if (top10TotalPercent > 90) {
+    return {
+      passed: false,
+      reason: `Top 10 holders own ${top10TotalPercent.toFixed(
+        2
+      )}% combined (max: 90%)`,
+      percent: top10TotalPercent,
+    };
+  }
+
+  return { passed: true, top10Percent: top10TotalPercent };
+}
+
+async function checkLpLocked(report, mintAddress) {
+  const lpLockedPct = report.lpLockedPct || 0;
+
+  if (lpLockedPct < MIN_LP_LOCKED_PERCENT) {
+    return {
+      passed: false,
+      reason: `LP locked: ${lpLockedPct.toFixed(
+        2
+      )}% (min: ${MIN_LP_LOCKED_PERCENT}%)`,
+      lpLockedPct,
+    };
+  }
+
+  return { passed: true, lpLockedPct };
+}
+
+async function checkPoolAge(report, mintAddress) {
+  if (!report.markets || report.markets.length === 0) {
+    return { passed: false, reason: "No markets found" };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  let oldestPoolAge = 0;
+
+  for (const market of report.markets) {
+    if (market.createdAt) {
+      const poolAge = now - market.createdAt;
+      if (poolAge > oldestPoolAge) {
+        oldestPoolAge = poolAge;
+      }
+    }
+  }
+
+  if (oldestPoolAge < MIN_POOL_AGE_SECONDS) {
+    return {
+      passed: false,
+      reason: `Pool too new: ${oldestPoolAge}s (min: ${MIN_POOL_AGE_SECONDS}s)`,
+      poolAge: oldestPoolAge,
+    };
+  }
+
+  return { passed: true, poolAge: oldestPoolAge };
+}
+
+async function checkForKnownRisks(report, mintAddress) {
+  const criticalRisks = [];
+
+  if (report.risks && report.risks.length > 0) {
+    for (const risk of report.risks) {
+      const riskName = (risk.name || "").toLowerCase();
+      const riskLevel = (risk.level || "").toUpperCase();
+
+      if (riskName.includes("copycat") || riskName.includes("copy cat")) {
+        criticalRisks.push({
+          name: risk.name,
+          level: riskLevel,
+          description: risk.description,
+        });
+      }
+
+      if (riskName.includes("low liquidity") && riskLevel === "DANGER") {
+        criticalRisks.push({
+          name: risk.name,
+          level: riskLevel,
+          description: risk.description,
+        });
+      }
+
+      if (
+        riskName.includes("single holder") ||
+        riskName.includes("high concentration")
+      ) {
+        criticalRisks.push({
+          name: risk.name,
+          level: riskLevel,
+          description: risk.description,
+        });
+      }
+
+      if (riskName.includes("rug") || riskName.includes("scam")) {
+        criticalRisks.push({
+          name: risk.name,
+          level: riskLevel,
+          description: risk.description,
+        });
+      }
+
+      if (riskName.includes("unlocked") && riskLevel === "DANGER") {
+        criticalRisks.push({
+          name: risk.name,
+          level: riskLevel,
+          description: risk.description,
+        });
+      }
+    }
+  }
+
+  if (criticalRisks.length > 0) {
+    return { passed: false, criticalRisks };
+  }
+
+  return { passed: true };
+}
+
 export async function checkRug(mintAddress) {
   await logEvent(
     "INFO",
@@ -205,7 +828,33 @@ export async function checkRug(mintAddress) {
       return null;
     }
 
-    // --- Vetting Pipeline ---
+    if (report.rugged) {
+      await logEvent("WARN", `Vetting failed: Token already rugged.`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // Check token age - skip coins older than MAX_TOKEN_AGE_MINUTES
+    if (report.detectedAt) {
+      const tokenCreatedAt = new Date(report.detectedAt);
+      const tokenAgeMinutes = (Date.now() - tokenCreatedAt.getTime()) / 60000;
+
+      if (tokenAgeMinutes > MAX_TOKEN_AGE_MINUTES) {
+        await logEvent("WARN", `Vetting failed: Token too old (${tokenAgeMinutes.toFixed(1)} min > ${MAX_TOKEN_AGE_MINUTES} min max).`, {
+          mint: mintAddress,
+          tokenAgeMinutes: tokenAgeMinutes.toFixed(1),
+          maxAgeMinutes: MAX_TOKEN_AGE_MINUTES,
+          createdAt: report.detectedAt,
+        });
+        return null;
+      }
+
+      await logEvent("INFO", `Token age OK: ${tokenAgeMinutes.toFixed(1)} min (max: ${MAX_TOKEN_AGE_MINUTES} min)`, {
+        mint: mintAddress,
+      });
+    }
+
     if (report.simulation?.loss > 0) {
       await logEvent(
         "WARN",
@@ -214,18 +863,87 @@ export async function checkRug(mintAddress) {
       );
       return null;
     }
+
     if (report.token?.freezeAuthority) {
       await logEvent("WARN", `Vetting failed: Token is freezable.`, {
         mint: mintAddress,
       });
       return null;
     }
+
     if (report.token?.mintAuthority) {
       await logEvent("WARN", `Vetting failed: Token is mintable.`, {
         mint: mintAddress,
       });
       return null;
     }
+
+    if (REQUIRE_VERIFIED_TOKEN && !report.verified) {
+      await logEvent(
+        "WARN",
+        `Vetting failed: Token not verified on RugCheck.`,
+        { mint: mintAddress }
+      );
+      return null;
+    }
+
+    const lpCheck = await checkLpLocked(report, mintAddress);
+    if (!lpCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${lpCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+    await logEvent("INFO", `LP locked: ${lpCheck.lpLockedPct.toFixed(2)}%`, {
+      mint: mintAddress,
+    });
+
+    const holderCheck = await checkTopHolderConcentration(report, mintAddress);
+    if (!holderCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${holderCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // CHECK: Insider wallets detected by RugCheck
+    const insiderCheck = await checkForInsiders(report, mintAddress);
+    if (!insiderCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${insiderCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // CHECK: Total risk score (too many danger flags = skip)
+    const riskScoreCheck = await checkRiskScore(report, mintAddress);
+    if (!riskScoreCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${riskScoreCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // CHECK: Creator holds too much (can rug instantly)
+    const creatorBalanceCheck = await checkCreatorBalance(report, mintAddress);
+    if (!creatorBalanceCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${creatorBalanceCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    const riskCheck = await checkForKnownRisks(report, mintAddress);
+    if (!riskCheck.passed) {
+      const riskNames = riskCheck.criticalRisks.map((r) => r.name).join(", ");
+      await logEvent(
+        "WARN",
+        `Vetting failed: Critical risks detected - ${riskNames}`,
+        { mint: mintAddress, risks: riskCheck.criticalRisks }
+      );
+      return null;
+    }
+
     if (report.totalMarketLiquidity < MIN_LIQUIDITY_USD) {
       await logEvent("WARN", `Vetting failed: Insufficient liquidity.`, {
         mint: mintAddress,
@@ -234,6 +952,7 @@ export async function checkRug(mintAddress) {
       });
       return null;
     }
+
     if (report.totalMarketLiquidity > MAX_LIQUIDITY_USD) {
       await logEvent("WARN", `Vetting failed: Liquidity too high.`, {
         mint: mintAddress,
@@ -242,6 +961,7 @@ export async function checkRug(mintAddress) {
       });
       return null;
     }
+
     const marketCap =
       report.price * (report.token.supply / 10 ** report.token.decimals);
     if (marketCap < MIN_MARKET_CAP_USD) {
@@ -253,7 +973,6 @@ export async function checkRug(mintAddress) {
       return null;
     }
 
-    // Creator and insider checks
     let creatorAddress = report.creator?.address || report.creator;
     if (!creatorAddress) {
       await logEvent(
@@ -268,34 +987,61 @@ export async function checkRug(mintAddress) {
       await logEvent("INFO", `Creator address found: ${creatorAddress}`, {
         mint: mintAddress,
       });
+
+      // CHECK 1: Is this a SERIAL RUGGER? (rugged 2+ tokens before)
+      if (await checkSerialRugger(creatorAddress, mintAddress)) {
+        await logEvent("WARN", `Vetting FAILED: Creator is a SERIAL RUGGER!`, {
+          mint: mintAddress,
+          creator: creatorAddress,
+        });
+        return null;
+      }
+
+      // CHECK 2: Did creator dump THIS token within 10 min of creation?
       if (await detectEarlyDevSell(creatorAddress, mintAddress)) {
         return null;
       }
     } else {
       await logEvent(
         "WARN",
-        `Could not perform early dev sell check. Creator address not found.`,
+        `Could not perform creator checks. Creator address not found.`,
         { mint: mintAddress }
       );
     }
 
-    // --- Determine Risk Level ---
-    let overallRiskLevel = "DANGER";
+    // CHECK 3: Are TOP HOLDERS dumping within 10 min?
+    const topHoldersDumpCheck = await checkTopHoldersDumping(report, mintAddress);
+    if (!topHoldersDumpCheck.passed) {
+      await logEvent("WARN", `Vetting FAILED: ${topHoldersDumpCheck.reason}`, {
+        mint: mintAddress,
+        dumpingHolders: topHoldersDumpCheck.dumpingHolders,
+      });
+      return null;
+    }
+
+    let overallRiskLevel = RISK_LEVELS.DANGER;
     if (report.risks && report.risks.length > 0) {
       const riskLevels = report.risks.map((r) => r.level.toUpperCase());
-      if (riskLevels.includes("DANGER")) overallRiskLevel = "DANGER";
-      else if (riskLevels.includes("WARN")) overallRiskLevel = "WARNING";
+      if (riskLevels.includes("DANGER")) overallRiskLevel = RISK_LEVELS.DANGER;
+      else if (riskLevels.includes("WARN"))
+        overallRiskLevel = RISK_LEVELS.WARNING;
+      else overallRiskLevel = RISK_LEVELS.GOOD;
     }
 
     const summaryForPrompt = {
       score: report.score_normalised,
       risks: report.risks || [],
       risk: { level: overallRiskLevel },
+      lpLockedPct: lpCheck.lpLockedPct,
+      liquidity: report.totalMarketLiquidity,
+      creatorAddress: creatorAddress || null, // Include creator for post-purchase monitoring
     };
 
     await logEvent("SUCCESS", `Vetting passed for token.`, {
       mint: mintAddress,
       risk: summaryForPrompt.risk.level,
+      lpLocked: `${lpCheck.lpLockedPct.toFixed(2)}%`,
+      liquidity: `$${report.totalMarketLiquidity.toFixed(2)}`,
     });
     return summaryForPrompt;
   } catch (error) {
@@ -309,7 +1055,6 @@ export async function checkRug(mintAddress) {
       await logEvent("ERROR", `Error during vetting process`, {
         mint: mintAddress,
         error: error.message,
-        stack: error.stack,
       });
     }
     return null;

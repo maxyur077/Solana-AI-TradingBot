@@ -1,19 +1,18 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import {
-  RAYDIUM_LIQUIDITY_POOL_V4,
   RPC_URL,
   WALLET_KEYPAIR,
   MAX_PORTFOLIO_SIZE,
-  SOL_MINT,
   GLOBAL_STOP_LOSS_USD,
-  HELIUS_API_KEY,
-  ADDITIONAL_RPC_URLS,
   WEBHOOK_ENABLED,
   WEBHOOK_PATH,
   DETECTION_MODE,
   MONITORED_DEXES,
+  ADDITIONAL_RPC_URLS,
+  METEORA_ENABLED,
+  RAYDIUM_ENABLED,
+  getActiveDexConfig,
 } from "./config.js";
-import { shouldBuyToken } from "./services/geminiService.js";
 import {
   buyToken,
   monitorPortfolio,
@@ -21,6 +20,7 @@ import {
   getTotalPnlUsd,
   getPortfolio,
   startRealtimeMonitoringForAllPositions,
+  setPortfolioCallbacks,
 } from "./services/tradeService.js";
 import { initTrailingStopService } from "./services/realtimeTrailingStopService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
@@ -39,81 +39,92 @@ import {
   markSignatureProcessed,
 } from "./services/webhookService.js";
 import {
-  startMultiRpcMonitoring,
+  initDexManager,
+  subscribeToMeteora,
+  unsubscribeFromMeteora,
+  subscribeToRaydium,
+  setMeteoraCallback,
+  setRaydiumCallback,
+  getSubscriptionStatus,
   getRpcHealthStatus,
-} from "./services/multiRpcService.js";
-import {
-  startMeteoraMonitoring,
-  getActiveMeteoraSubscriptions,
-  shouldFilterMeteoraToken,
-} from "./services/meteoraService.js";
+} from "./services/dexManager.js";
+import { shouldFilterMeteoraToken } from "./utils/helpers.js";
 import chalk from "chalk";
 import express from "express";
 
 const app = express();
-const connection = new Connection(RPC_URL, {
-  commitment: "processed", // Faster than "confirmed"
-  wsEndpoint: RPC_URL.replace("https://", "wss://").replace("http://", "ws://"),
-});
+app.use(express.json({ limit: "10mb" }));
 
-// Helper sleep function
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * Process a new liquidity pool - called from any DEX monitor
- * @param {string} signature - Transaction signature
- * @param {string} mintAddress - Token mint address
- * @param {Object} transaction - Full transaction object (optional)
- * @param {string} source - Source DEX (raydium, meteora-dlmm, etc.)
- * @param {string} poolAddress - Pool address for direct swaps (optional)
- */
-async function processNewPool(signature, mintAddress, transaction = null, source = "unknown", poolAddress = null) {
+async function processNewPool(
+  signature,
+  mintAddress,
+  transaction = null,
+  source = "unknown",
+  poolAddress = null
+) {
   try {
-    // Check portfolio capacity
     if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
-      await logEvent("INFO", `Portfolio full (${getPortfolioSize()}/${MAX_PORTFOLIO_SIZE}). Skipping new token.`);
+      await logEvent(
+        "INFO",
+        `Portfolio full (${getPortfolioSize()}/${MAX_PORTFOLIO_SIZE}). Skipping new token.`
+      );
       return;
     }
 
-    // Skip if already purchased
     if (await hasBeenPurchased(mintAddress)) {
       return;
     }
 
-    // Get token metadata
     const metadata = await getTokenMetadata(mintAddress);
     if (!metadata) {
-      await logEvent("WARN", `Could not fetch metadata for ${mintAddress}. Skipping.`);
+      await logEvent(
+        "WARN",
+        `Could not fetch metadata for ${mintAddress}. Skipping.`
+      );
       return;
     }
 
-    // Filter out Meteora internal tokens (Position NFTs, LP tokens, etc.)
-    if (source.startsWith("meteora") && shouldFilterMeteoraToken(metadata.name, metadata.symbol)) {
-      await logEvent("INFO", `Filtering Meteora internal token: ${metadata.name} (${metadata.symbol})`);
+    if (
+      source.startsWith("meteora") &&
+      shouldFilterMeteoraToken(metadata.name, metadata.symbol)
+    ) {
+      await logEvent(
+        "INFO",
+        `Filtering Meteora internal token: ${metadata.name} (${metadata.symbol})`
+      );
       return;
     }
 
-    // Check blacklist
     if (isBlacklisted(metadata.name, metadata.symbol)) {
-      await logEvent("WARN", `Skipping blacklisted token: ${metadata.name} (${metadata.symbol})`);
+      await logEvent(
+        "WARN",
+        `Skipping blacklisted token: ${metadata.name} (${metadata.symbol})`
+      );
       return;
     }
 
     await logEvent(
       "INFO",
-      `[${source.toUpperCase()}] New token: ${metadata.name} (${metadata.symbol}) | Mint: ${mintAddress}`
+      `[${source.toUpperCase()}] New token: ${metadata.name} (${
+        metadata.symbol
+      }) | Mint: ${mintAddress}`
     );
 
-    // Perform vetting
     const rugCheckReport = await checkRug(mintAddress);
     if (!rugCheckReport) {
       await logEvent("WARN", `Vetting failed for ${mintAddress}. Skipping.`);
       return;
     }
 
-    // Buy the token - pass poolAddress and source DEX
-    // Meteora tokens will be bought/sold directly on Meteora (not Jupiter)
-    await buyToken(mintAddress, rugCheckReport.risk.level, metadata, poolAddress, source);
+    // Pass creator address for real-time monitoring after purchase
+    await buyToken(
+      mintAddress,
+      rugCheckReport.risk.level,
+      metadata,
+      poolAddress,
+      source,
+      rugCheckReport.creatorAddress
+    );
   } catch (error) {
     await logEvent("ERROR", `Error processing new pool from ${source}:`, {
       signature,
@@ -123,120 +134,75 @@ async function processNewPool(signature, mintAddress, transaction = null, source
   }
 }
 
-/**
- * Process transaction from onLogs (legacy method for Raydium)
- * @param {Object} transaction - Parsed transaction
- */
-async function processNewLiquidityPool(transaction) {
-  try {
-    if (getPortfolioSize() >= MAX_PORTFOLIO_SIZE) {
-      return;
-    }
+async function handlePortfolioFull() {
+  const dexConfig = getActiveDexConfig();
 
-    if (!transaction || !transaction.meta || !transaction.meta.postTokenBalances) {
-      return;
-    }
-
-    const postTokenBalances = transaction.meta.postTokenBalances;
-    const newMintInfo = postTokenBalances.find(
-      (tb) =>
-        tb.mint !== SOL_MINT &&
-        tb.owner === "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+  if (dexConfig.meteora && METEORA_ENABLED) {
+    await logEvent(
+      "INFO",
+      "Portfolio has 2+ coins. Unsubscribing from Meteora to focus on monitoring."
     );
-
-    if (!newMintInfo) return;
-
-    const newMint = newMintInfo.mint;
-
-    // Use the unified processNewPool function
-    await processNewPool(null, newMint, transaction, "raydium");
-  } catch (error) {
-    await logEvent("ERROR", "Error processing Raydium pool:", { error: error.message });
+    await unsubscribeFromMeteora();
   }
 }
 
-/**
- * Legacy onLogs monitoring for Raydium (backup method)
- */
-async function monitorRaydiumLegacy() {
-  await logEvent("INFO", "Starting Raydium onLogs monitoring...");
+async function handlePortfolioAvailable() {
+  const dexConfig = getActiveDexConfig();
 
-  connection.onLogs(
-    new PublicKey(RAYDIUM_LIQUIDITY_POOL_V4),
-    async ({ logs, signature, err }) => {
-      // Skip errors
-      if (err) return;
-
-      // Only process pool initialization
-      if (!logs.some((log) => log.includes("initialize2"))) return;
-
-      // Skip if already processed
-      if (hasProcessedSignature(signature)) return;
-
-      markSignatureProcessed(signature);
-
-      try {
-        const tx = await connection.getParsedTransaction(signature, {
-          maxSupportedTransactionVersion: 0,
-          commitment: "confirmed",
-        });
-        await processNewLiquidityPool(tx);
-      } catch (error) {
-        await logEvent("ERROR", "Failed to get Raydium transaction", {
-          signature,
-          error: error.message,
-        });
-      }
-    },
-    "processed"
-  );
+  if (dexConfig.meteora && METEORA_ENABLED) {
+    await logEvent("INFO", "Portfolio has space. Re-subscribing to Meteora.");
+    const meteoraTypes = getMeteoraTypesFromConfig();
+    await subscribeToMeteora(meteoraTypes);
+  }
 }
 
-/**
- * Start Meteora monitoring based on configured DEXes
- */
-async function startMeteoraMonitors() {
+function getMeteoraTypesFromConfig() {
   const meteoraTypes = [];
-
-  if (MONITORED_DEXES.includes("meteora-dlmm")) {
-    meteoraTypes.push("DLMM");
-  }
-  if (MONITORED_DEXES.includes("meteora-damm-v2")) {
-    meteoraTypes.push("DAMM_V2");
-  }
-  if (MONITORED_DEXES.includes("meteora-damm-v1")) {
-    meteoraTypes.push("DAMM_V1");
-  }
-  if (MONITORED_DEXES.includes("meteora-dbc")) {
-    meteoraTypes.push("DBC");
-  }
-
-  if (meteoraTypes.length > 0) {
-    await startMeteoraMonitoring(
-      connection,
-      async (signature, mintAddress, tx, programType, poolAddress) => {
-        await processNewPool(signature, mintAddress, tx, `meteora-${programType.toLowerCase()}`, poolAddress);
-      },
-      meteoraTypes
-    );
-  }
+  if (MONITORED_DEXES.includes("meteora-dlmm")) meteoraTypes.push("DLMM");
+  if (MONITORED_DEXES.includes("meteora-damm-v2")) meteoraTypes.push("DAMM_V2");
+  if (MONITORED_DEXES.includes("meteora-damm-v1")) meteoraTypes.push("DAMM_V1");
+  if (MONITORED_DEXES.includes("meteora-dbc")) meteoraTypes.push("DBC");
+  return meteoraTypes.length > 0 ? meteoraTypes : ["DLMM", "DAMM_V2"];
 }
 
-/**
- * Start pool monitoring based on configured detection mode and DEXes
- */
 async function startPoolMonitoring() {
   const mode = DETECTION_MODE.toLowerCase();
+  const dexConfig = getActiveDexConfig();
 
-  await logEvent("INFO", `Starting pool monitoring in ${mode.toUpperCase()} mode`);
-  await logEvent("INFO", `Monitoring DEXes: ${MONITORED_DEXES.join(", ")}`);
+  await logEvent(
+    "INFO",
+    `Starting pool monitoring in ${mode.toUpperCase()} mode`
+  );
+  await logEvent("INFO", `DEX Config: ${dexConfig.mode}`);
+  await logEvent(
+    "INFO",
+    `METEORA_ENABLED: ${METEORA_ENABLED}, RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}`
+  );
 
-  // Start Raydium monitoring if enabled
-  const monitorRaydium = MONITORED_DEXES.includes("raydium");
+  initDexManager();
+
+  setMeteoraCallback(
+    async (signature, mintAddress, tx, programType, poolAddress) => {
+      await processNewPool(
+        signature,
+        mintAddress,
+        tx,
+        `meteora-${programType.toLowerCase()}`,
+        poolAddress
+      );
+    }
+  );
+
+  setRaydiumCallback(async (signature, mintAddress, tx) => {
+    await processNewPool(signature, mintAddress, tx, "raydium");
+  });
+
+  const monitorRaydium =
+    dexConfig.raydium && MONITORED_DEXES.includes("raydium");
+  const monitorMeteora = dexConfig.meteora;
 
   switch (mode) {
     case "hybrid":
-      // Both webhook and multi-RPC for maximum coverage
       if (WEBHOOK_ENABLED) {
         setupWebhookReceiver(app, WEBHOOK_PATH);
         setNewPoolCallback(async (signature, mintAddress, tx) => {
@@ -245,22 +211,22 @@ async function startPoolMonitoring() {
         await logEvent("INFO", "Webhook receiver enabled (hybrid mode)");
       }
 
-      // Start multi-RPC monitoring for Raydium
       if (monitorRaydium) {
-        const hybridRpcs = [RPC_URL, ...ADDITIONAL_RPC_URLS].filter(Boolean);
-        await startMultiRpcMonitoring(hybridRpcs, async (signature, mintAddress, tx) => {
-          await processNewPool(signature, mintAddress, tx, "raydium");
-        });
+        await subscribeToRaydium();
       }
 
-      // Start Meteora monitoring
-      await startMeteoraMonitors();
+      if (monitorMeteora) {
+        const meteoraTypes = getMeteoraTypesFromConfig();
+        await subscribeToMeteora(meteoraTypes);
+      }
       break;
 
     case "webhook":
-      // Webhook only
       if (!WEBHOOK_ENABLED) {
-        await logEvent("ERROR", "Webhook mode selected but WEBHOOK_ENABLED is false");
+        await logEvent(
+          "ERROR",
+          "Webhook mode selected but WEBHOOK_ENABLED is false"
+        );
         process.exit(1);
       }
       setupWebhookReceiver(app, WEBHOOK_PATH);
@@ -271,58 +237,34 @@ async function startPoolMonitoring() {
       break;
 
     case "multi-rpc":
-      // Multi-RPC parallel monitoring (default, best free option)
-      if (monitorRaydium) {
-        const rpcUrls = [RPC_URL, ...ADDITIONAL_RPC_URLS].filter(Boolean);
-
-        if (rpcUrls.length === 1) {
-          await logEvent("INFO", "Single RPC mode (add ADDITIONAL_RPC_URLS for redundancy)");
-        } else {
-          await logEvent("INFO", `Multi-RPC mode with ${rpcUrls.length} endpoints`);
-        }
-
-        await startMultiRpcMonitoring(rpcUrls, async (signature, mintAddress, tx) => {
-          await processNewPool(signature, mintAddress, tx, "raydium");
-        });
-      }
-
-      // Start Meteora monitoring
-      await startMeteoraMonitors();
-      break;
-
-    case "onlogs":
     default:
-      // Legacy single RPC onLogs
       if (monitorRaydium) {
-        await monitorRaydiumLegacy();
+        await subscribeToRaydium();
       }
 
-      // Start Meteora monitoring
-      await startMeteoraMonitors();
+      if (monitorMeteora) {
+        const meteoraTypes = getMeteoraTypesFromConfig();
+        await subscribeToMeteora(meteoraTypes);
+      }
       break;
   }
 }
 
-/**
- * Start the Express server for health checks and webhook
- */
 function startServer() {
-  // Health check endpoint
   app.get("/health", async (req, res) => {
     const rpcHealth = await getRpcHealthStatus();
-    const meteoraSubs = getActiveMeteoraSubscriptions();
+    const subscriptionStatus = getSubscriptionStatus();
     res.status(200).json({
       status: "OK",
       portfolioSize: getPortfolioSize(),
       totalPnlUsd: getTotalPnlUsd().toFixed(4),
       detectionMode: DETECTION_MODE,
-      monitoredDexes: MONITORED_DEXES,
-      meteoraSubscriptions: meteoraSubs,
+      dexConfig: getActiveDexConfig(),
+      subscriptions: subscriptionStatus,
       rpcConnections: rpcHealth,
     });
   });
 
-  // RPC status endpoint
   app.get("/rpc-status", async (req, res) => {
     const status = await getRpcHealthStatus();
     res.status(200).json(status);
@@ -333,23 +275,22 @@ function startServer() {
     logEvent("INFO", `Server started on port ${port}`);
     logEvent("INFO", `Health check: http://localhost:${port}/health`);
     if (WEBHOOK_ENABLED) {
-      logEvent("INFO", `Webhook endpoint: http://localhost:${port}${WEBHOOK_PATH}`);
+      logEvent(
+        "INFO",
+        `Webhook endpoint: http://localhost:${port}${WEBHOOK_PATH}`
+      );
     }
   });
 }
 
-/**
- * Main entry point
- */
 async function main() {
-  // Initialize database
   await initDb();
   await loadBlacklist();
 
-  // Initialize real-time trailing stop-loss service
   await initTrailingStopService();
 
-  // Load active trades from database
+  setPortfolioCallbacks(handlePortfolioFull, handlePortfolioAvailable);
+
   const activeTrades = await loadActiveTrades();
   const portfolio = getPortfolio();
 
@@ -363,6 +304,7 @@ async function main() {
       purchaseTimestamp: new Date(trade.timestamp).getTime(),
       highestPriceSeen: trade.token_price_in_sol,
       buySignature: trade.signature,
+      dexSource: trade.dex_source || null,
     });
   }
 
@@ -371,7 +313,6 @@ async function main() {
     `Loaded ${portfolio.size} active/failed trades from database.`
   );
 
-  // Start real-time monitoring for restored positions
   if (portfolio.size > 0) {
     startRealtimeMonitoringForAllPositions();
     await logEvent(
@@ -380,31 +321,39 @@ async function main() {
     );
   }
 
-  // Display startup banner
-  console.log(chalk.bold.magenta("===================================================="));
-  console.log(chalk.bold.magenta("   🤖 Advanced Solana AI Trading Bot Initialized 🤖  "));
-  console.log(chalk.bold.magenta("===================================================="));
+  const dexConfig = getActiveDexConfig();
+
+  console.log(
+    chalk.bold.magenta("====================================================")
+  );
+  console.log(chalk.bold.magenta("   Solana AI Trading Bot Initialized   "));
+  console.log(
+    chalk.bold.magenta("====================================================")
+  );
   console.log(chalk.cyan(`   Detection Mode: ${DETECTION_MODE.toUpperCase()}`));
-  console.log(chalk.cyan(`   Monitored DEXes: ${MONITORED_DEXES.join(", ")}`));
+  console.log(chalk.cyan(`   DEX Mode: ${dexConfig.mode}`));
+  console.log(chalk.cyan(`   METEORA_ENABLED: ${METEORA_ENABLED}`));
+  console.log(chalk.cyan(`   RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}`));
   console.log(chalk.cyan(`   Primary RPC: ${RPC_URL.substring(0, 50)}...`));
   if (ADDITIONAL_RPC_URLS.length > 0) {
-    console.log(chalk.cyan(`   Additional RPCs: ${ADDITIONAL_RPC_URLS.length}`));
+    console.log(
+      chalk.cyan(`   Additional RPCs: ${ADDITIONAL_RPC_URLS.length}`)
+    );
   }
   if (WEBHOOK_ENABLED) {
     console.log(chalk.cyan(`   Webhook: ENABLED at ${WEBHOOK_PATH}`));
   }
-  console.log(chalk.bold.magenta("===================================================="));
+  console.log(
+    chalk.bold.magenta("====================================================")
+  );
 
   await logEvent("INFO", `Wallet: ${WALLET_KEYPAIR.publicKey.toBase58()}`);
   await sendStartupNotification(WALLET_KEYPAIR.publicKey.toBase58());
 
-  // Start server (for health checks and webhook)
   startServer();
 
-  // Start pool monitoring based on configured mode
   await startPoolMonitoring();
 
-  // Portfolio monitoring interval
   setInterval(async () => {
     await logEvent("INFO", "Performing scheduled portfolio check...");
     await monitorPortfolio();
@@ -418,10 +367,9 @@ async function main() {
       );
       process.exit(1);
     }
-  }, 30000);
+  }, 15000);
 }
 
-// Handle graceful shutdown
 process.on("SIGINT", async () => {
   await logEvent("INFO", "Shutting down gracefully...");
   process.exit(0);
