@@ -425,6 +425,21 @@ export async function sellToken(mintAddress, sellPercentage) {
 
   if (!sellResult || !sellResult.success) {
     await logEvent("ERROR", `Failed to sell ${mintAddress} after all attempts.`, null, totalPnlUsd);
+
+    // Check if coin has been held for more than 8 minutes - assume rugged
+    const timeHeldMinutes = (Date.now() - position.purchaseTimestamp) / 60000;
+    if (timeHeldMinutes >= 8) {
+      await logEvent("ERROR", `🚨 ASSUMED RUGGED: ${mintAddress} held for ${timeHeldMinutes.toFixed(1)} min and cannot be sold. Removing from portfolio.`, null, totalPnlUsd);
+      stopTrailingStopMonitor(mintAddress);
+      await stopCreatorMonitor(mintAddress, "Assumed rugged - cannot sell");
+      await stopPoolReserveMonitor(mintAddress, "Assumed rugged - cannot sell");
+      activeMonitors.delete(mintAddress);
+      portfolio.delete(mintAddress);
+      await updateTradeStatus(position.buySignature, "RUGGED");
+      await checkAndNotifyPortfolioAvailable();
+      return false;
+    }
+
     await updateTradeStatus(position.buySignature, "SELL_FAILED");
     return false;
   }
@@ -610,6 +625,23 @@ export async function monitorPortfolio() {
     if (position.riskLevel === "DANGER" && pnlPercentage <= DEEP_LOSS_PERCENT_DANGER) {
       await logEvent("WARN", `DANGER coin deep loss condition triggered. Selling 100%.`, { pnl: pnlPercentage }, totalPnlUsd);
       await sellToken(mintAddress, 100);
+      continue;
+    }
+
+    // ASSUMED RUGGED: If held for 8+ minutes and still in portfolio, force remove
+    if (timeHeldMins >= 8) {
+      await logEvent("WARN", `Coin held for ${timeHeldMins.toFixed(1)} min. Attempting final sell before assuming rugged...`, null, totalPnlUsd);
+      const sold = await sellToken(mintAddress, 100);
+      if (!sold && portfolio.has(mintAddress)) {
+        await logEvent("ERROR", `🚨 ASSUMED RUGGED: ${mintAddress} cannot be sold after 8 min. Force removing from portfolio.`, null, totalPnlUsd);
+        stopTrailingStopMonitor(mintAddress);
+        await stopCreatorMonitor(mintAddress, "Assumed rugged after 8 min");
+        await stopPoolReserveMonitor(mintAddress, "Assumed rugged after 8 min");
+        activeMonitors.delete(mintAddress);
+        portfolio.delete(mintAddress);
+        await updateTradeStatus(position.buySignature, "RUGGED");
+        await checkAndNotifyPortfolioAvailable();
+      }
       continue;
     }
 
