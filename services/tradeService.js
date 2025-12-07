@@ -23,7 +23,6 @@ import {
 } from "../config.js";
 import { sendAndConfirmTransaction, getTokenPriceInSol, connection, getSolPriceUsd } from "./solanaService.js";
 import { logEvent, logTrade, addPurchasedToken, updateTradeStatus } from "./databaseService.js";
-import { addToBlacklist } from "./blacklistService.js";
 import { sendBuyNotification, sendSellNotification } from "./telegramService.js";
 import { startTrailingStopMonitor, stopTrailingStopMonitor, isBeingMonitored } from "./realtimeTrailingStopService.js";
 import { swapOnMeteora, sellOnMeteora, findMeteoraPool, getMeteoraTokenPrice } from "./meteoraSwapService.js";
@@ -315,7 +314,6 @@ export async function buyToken(mintAddress, riskLevel, metadata, poolAddress = n
     });
   }
 
-  await addToBlacklist(metadata.name, metadata.symbol);
   await logEvent("SUCCESS", `Bought ${mintAddress} via ${finalDexSource}!`);
 
   await checkAndNotifyPortfolioStatus();

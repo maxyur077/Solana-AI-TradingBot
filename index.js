@@ -30,7 +30,6 @@ import {
   hasBeenPurchased,
   loadActiveTrades,
 } from "./services/databaseService.js";
-import { loadBlacklist, isBlacklisted } from "./services/blacklistService.js";
 import { sendStartupNotification } from "./services/telegramService.js";
 import {
   setupWebhookReceiver,
@@ -91,14 +90,6 @@ async function processNewPool(
       await logEvent(
         "INFO",
         `Filtering Meteora internal token: ${metadata.name} (${metadata.symbol})`
-      );
-      return;
-    }
-
-    if (isBlacklisted(metadata.name, metadata.symbol)) {
-      await logEvent(
-        "WARN",
-        `Skipping blacklisted token: ${metadata.name} (${metadata.symbol})`
       );
       return;
     }
@@ -285,7 +276,6 @@ function startServer() {
 
 async function main() {
   await initDb();
-  await loadBlacklist();
 
   await initTrailingStopService();
 

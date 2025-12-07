@@ -13,6 +13,12 @@ import {
   MAX_TOKEN_AGE_MINUTES,
   MAX_TOP_HOLDER_PERCENT,
   REQUIRE_VERIFIED_TOKEN,
+  MAX_SINGLE_HOLDER_PERCENT,
+  MIN_LP_PROVIDERS,
+  MIN_LIQUIDITY_AGE_SECONDS,
+  MAX_BUNDLED_TX_INSTRUCTIONS,
+  CHECK_CREATOR_HISTORY,
+  MAX_CREATOR_RUGGED_TOKENS,
 } from "../config.js";
 import { connection } from "./solanaService.js";
 import { PublicKey } from "@solana/web3.js";
@@ -811,6 +817,290 @@ async function checkForKnownRisks(report, mintAddress) {
   return { passed: true };
 }
 
+/**
+ * CHECK: Single holder owns too much (> 50% by default)
+ * This catches tokens where one wallet can instantly dump and crash the price
+ */
+async function checkSingleHolderDominance(report, mintAddress) {
+  if (!report.topHolders || report.topHolders.length === 0) {
+    return { passed: true };
+  }
+
+  const nonLpHolders = report.topHolders.filter(
+    (h) => !h.isLpToken && !h.isPool
+  );
+
+  for (const holder of nonLpHolders.slice(0, 5)) {
+    const holderPercent = holder.pct || 0;
+    if (holderPercent > MAX_SINGLE_HOLDER_PERCENT) {
+      return {
+        passed: false,
+        reason: `Single holder owns ${holderPercent.toFixed(1)}% (max: ${MAX_SINGLE_HOLDER_PERCENT}%)`,
+        holder: holder.address?.slice(0, 8) + "...",
+        percent: holderPercent,
+      };
+    }
+  }
+
+  return { passed: true };
+}
+
+/**
+ * CHECK: Minimum LP providers count
+ * Tokens with 0 LP providers are extremely risky - anyone can drain all liquidity
+ */
+async function checkLpProvidersCount(report, mintAddress) {
+  const lpProviders = report.totalLPProviders || 0;
+
+  if (lpProviders < MIN_LP_PROVIDERS) {
+    return {
+      passed: false,
+      reason: `Only ${lpProviders} LP provider(s) (min: ${MIN_LP_PROVIDERS})`,
+      lpProviders,
+    };
+  }
+
+  await logEvent("INFO", `LP providers: ${lpProviders}`, { mint: mintAddress });
+  return { passed: true, lpProviders };
+}
+
+/**
+ * CHECK: Liquidity age - don't buy if liquidity was JUST added
+ * This helps avoid tokens where creator is about to rug immediately
+ */
+async function checkLiquidityAge(report, mintAddress) {
+  if (!report.markets || report.markets.length === 0) {
+    return { passed: false, reason: "No markets found" };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  let newestPoolAge = Infinity;
+  let newestPoolCreatedAt = null;
+
+  for (const market of report.markets) {
+    if (market.createdAt) {
+      const poolAge = now - market.createdAt;
+      if (poolAge < newestPoolAge) {
+        newestPoolAge = poolAge;
+        newestPoolCreatedAt = market.createdAt;
+      }
+    }
+  }
+
+  if (newestPoolAge < MIN_LIQUIDITY_AGE_SECONDS) {
+    return {
+      passed: false,
+      reason: `Liquidity too fresh: ${newestPoolAge}s (min: ${MIN_LIQUIDITY_AGE_SECONDS}s)`,
+      liquidityAge: newestPoolAge,
+    };
+  }
+
+  await logEvent("INFO", `Liquidity age: ${newestPoolAge}s`, { mint: mintAddress });
+  return { passed: true, liquidityAge: newestPoolAge };
+}
+
+/**
+ * CHECK: Bundled transaction detection
+ * Many rug pulls use bundled/atomic transactions with many instructions
+ * to set up the rug (create token, add liquidity, distribute to insiders, etc.)
+ */
+async function checkBundledCreation(mintAddress) {
+  try {
+    const mintPubKey = new PublicKey(mintAddress);
+    const signatures = await connection.getSignaturesForAddress(mintPubKey, {
+      limit: 5,
+    });
+
+    if (!signatures || signatures.length === 0) {
+      return { passed: true };
+    }
+
+    // Get the creation transaction (oldest one)
+    const createTxSig = signatures[signatures.length - 1].signature;
+    const createTx = await connection.getParsedTransaction(createTxSig, {
+      maxSupportedTransactionVersion: 0,
+    });
+
+    if (!createTx) {
+      return { passed: true };
+    }
+
+    // Count instructions in creation TX
+    const instructionCount =
+      createTx.transaction?.message?.instructions?.length || 0;
+
+    // Also check inner instructions (more thorough)
+    let innerInstructionCount = 0;
+    if (createTx.meta?.innerInstructions) {
+      for (const inner of createTx.meta.innerInstructions) {
+        innerInstructionCount += inner.instructions?.length || 0;
+      }
+    }
+
+    const totalInstructions = instructionCount + innerInstructionCount;
+
+    if (totalInstructions > MAX_BUNDLED_TX_INSTRUCTIONS) {
+      await logEvent(
+        "WARN",
+        `Suspicious bundled creation TX detected`,
+        {
+          mint: mintAddress,
+          instructionCount,
+          innerInstructionCount,
+          totalInstructions,
+          maxAllowed: MAX_BUNDLED_TX_INSTRUCTIONS,
+        }
+      );
+      return {
+        passed: false,
+        reason: `Suspicious bundled creation TX (${totalInstructions} instructions, max: ${MAX_BUNDLED_TX_INSTRUCTIONS})`,
+        instructionCount: totalInstructions,
+      };
+    }
+
+    await logEvent("INFO", `Creation TX instructions: ${totalInstructions}`, {
+      mint: mintAddress,
+    });
+    return { passed: true, instructionCount: totalInstructions };
+  } catch (error) {
+    await logEvent("WARN", "Error checking bundled creation", {
+      error: error.message,
+      mint: mintAddress,
+    });
+    return { passed: true }; // Don't fail on error
+  }
+}
+
+/**
+ * CHECK: Creator token history via Helius
+ * Checks if the creator has deployed tokens before that got rugged or have 0 liquidity
+ */
+async function checkCreatorTokenHistory(creatorAddress, currentMint) {
+  if (!CHECK_CREATOR_HISTORY || !creatorAddress) {
+    return { passed: true };
+  }
+
+  try {
+    // Use Helius DAS API to get assets created by this wallet
+    const response = await fetch(RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "get-created-tokens",
+        method: "getAssetsByCreator",
+        params: {
+          creatorAddress: creatorAddress,
+          page: 1,
+          limit: 20,
+        },
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!data.result?.items || data.result.items.length === 0) {
+      await logEvent("INFO", `Creator has no previous tokens`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+      });
+      return { passed: true, previousTokens: 0 };
+    }
+
+    const previousTokens = data.result.items.filter(
+      (item) => item.id !== currentMint
+    );
+
+    if (previousTokens.length === 0) {
+      return { passed: true, previousTokens: 0 };
+    }
+
+    await logEvent("INFO", `Checking creator's ${previousTokens.length} previous token(s)...`, {
+      creator: creatorAddress.slice(0, 8) + "...",
+    });
+
+    let ruggedCount = 0;
+    let deadCount = 0;
+    const ruggedTokens = [];
+
+    // Check each previous token (limit to first 5 to avoid rate limits)
+    for (const token of previousTokens.slice(0, 5)) {
+      try {
+        // Small delay to avoid rate limiting
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        const rugReport = await axios.get(
+          `https://api.rugcheck.xyz/v1/tokens/${token.id}/report`,
+          { timeout: 5000 }
+        );
+
+        if (rugReport.data) {
+          const isRugged = rugReport.data.rugged === true;
+          const isDead = (rugReport.data.totalMarketLiquidity || 0) < 100;
+
+          if (isRugged) {
+            ruggedCount++;
+            ruggedTokens.push({
+              mint: token.id.slice(0, 8) + "...",
+              status: "RUGGED",
+            });
+          } else if (isDead) {
+            deadCount++;
+            ruggedTokens.push({
+              mint: token.id.slice(0, 8) + "...",
+              status: "DEAD (no liquidity)",
+            });
+          }
+        }
+      } catch (tokenError) {
+        // Skip tokens that fail to fetch
+        continue;
+      }
+    }
+
+    const totalBadTokens = ruggedCount + deadCount;
+
+    if (totalBadTokens > MAX_CREATOR_RUGGED_TOKENS) {
+      await logEvent(
+        "WARN",
+        `Creator has ${totalBadTokens} rugged/dead token(s)!`,
+        {
+          creator: creatorAddress.slice(0, 8) + "...",
+          ruggedCount,
+          deadCount,
+          ruggedTokens,
+        }
+      );
+      return {
+        passed: false,
+        reason: `Creator has ${totalBadTokens} rugged/dead token(s) (max: ${MAX_CREATOR_RUGGED_TOKENS})`,
+        ruggedCount,
+        deadCount,
+        ruggedTokens,
+      };
+    }
+
+    await logEvent("INFO", `Creator history check passed`, {
+      creator: creatorAddress.slice(0, 8) + "...",
+      previousTokens: previousTokens.length,
+      ruggedCount,
+      deadCount,
+    });
+
+    return {
+      passed: true,
+      previousTokens: previousTokens.length,
+      ruggedCount,
+      deadCount,
+    };
+  } catch (error) {
+    await logEvent("WARN", "Error checking creator token history", {
+      error: error.message,
+      creator: creatorAddress,
+    });
+    return { passed: true }; // Don't fail on error
+  }
+}
+
 export async function checkRug(mintAddress) {
   await logEvent(
     "INFO",
@@ -901,6 +1191,33 @@ export async function checkRug(mintAddress) {
     const holderCheck = await checkTopHolderConcentration(report, mintAddress);
     if (!holderCheck.passed) {
       await logEvent("WARN", `Vetting failed: ${holderCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // NEW CHECK: Single holder dominance (> 50%)
+    const singleHolderCheck = await checkSingleHolderDominance(report, mintAddress);
+    if (!singleHolderCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${singleHolderCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // NEW CHECK: LP providers count (min 1)
+    const lpProvidersCheck = await checkLpProvidersCount(report, mintAddress);
+    if (!lpProvidersCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${lpProvidersCheck.reason}`, {
+        mint: mintAddress,
+      });
+      return null;
+    }
+
+    // NEW CHECK: Liquidity age (min 60 seconds)
+    const liquidityAgeCheck = await checkLiquidityAge(report, mintAddress);
+    if (!liquidityAgeCheck.passed) {
+      await logEvent("WARN", `Vetting failed: ${liquidityAgeCheck.reason}`, {
         mint: mintAddress,
       });
       return null;
@@ -999,6 +1316,17 @@ export async function checkRug(mintAddress) {
 
       // CHECK 2: Did creator dump THIS token within 10 min of creation?
       if (await detectEarlyDevSell(creatorAddress, mintAddress)) {
+        return null;
+      }
+
+      // NEW CHECK 3: Creator token history (has creator rugged before?)
+      const creatorHistoryCheck = await checkCreatorTokenHistory(creatorAddress, mintAddress);
+      if (!creatorHistoryCheck.passed) {
+        await logEvent("WARN", `Vetting FAILED: ${creatorHistoryCheck.reason}`, {
+          mint: mintAddress,
+          creator: creatorAddress,
+          ruggedTokens: creatorHistoryCheck.ruggedTokens,
+        });
         return null;
       }
     } else {

@@ -93,6 +93,31 @@ export const REQUIRE_VERIFIED_TOKEN = parseBoolean(
   false
 );
 
+// New vetting checks config
+export const MAX_SINGLE_HOLDER_PERCENT = parseFloat(
+  loadEnvVariable("MAX_SINGLE_HOLDER_PERCENT", "50", false)
+);
+export const MIN_LP_PROVIDERS = parseInt(
+  loadEnvVariable("MIN_LP_PROVIDERS", "0", false),
+  10
+);
+export const MIN_LIQUIDITY_AGE_SECONDS = parseInt(
+  loadEnvVariable("MIN_LIQUIDITY_AGE_SECONDS", "5", false),
+  10
+);
+export const MAX_BUNDLED_TX_INSTRUCTIONS = parseInt(
+  loadEnvVariable("MAX_BUNDLED_TX_INSTRUCTIONS", "10", false),
+  10
+);
+export const CHECK_CREATOR_HISTORY = parseBoolean(
+  loadEnvVariable("CHECK_CREATOR_HISTORY", "true", false),
+  true
+);
+export const MAX_CREATOR_RUGGED_TOKENS = parseInt(
+  loadEnvVariable("MAX_CREATOR_RUGGED_TOKENS", "0", false),
+  10
+);
+
 export const TRADE_AMOUNTS = {
   GOOD: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_GOOD")),
   WARNING: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_WARNING")),

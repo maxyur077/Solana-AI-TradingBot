@@ -1,0 +1,87 @@
+services:
+  - type: web
+    name: solana-ai-bot
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: BITQUERY_API_KEY
+        sync: false
+      - key: RPC_URL
+        sync: false
+      - key: PRIVATE_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: MAX_PORTFOLIO_SIZE
+        sync: false
+      - key: MIN_SOL_BALANCE
+        sync: false
+      - key: MIN_LIQUIDITY_USD
+        sync: false
+      - key: MAX_LIQUIDITY_USD
+        sync: false
+      - key: MIN_MARKET_CAP_USD
+        sync: false
+      - key: MAX_HOLDER_CONCENTRATION_PERCENT
+        sync: false
+      - key: MAX_DEV_WALLET_COUNT
+        sync: false
+      - key: MAX_INITIAL_DEV_SELL_PERCENT
+        sync: false
+      - key: MIN_LP_LOCKED_PERCENT
+        sync: false
+      - key: MIN_POOL_AGE_SECONDS
+        sync: false
+      - key: MAX_TOP_HOLDER_PERCENT
+        sync: false
+      - key: TRADE_AMOUNT_SOL_GOOD
+        sync: false
+      - key: TRADE_AMOUNT_SOL_WARNING
+        sync: false
+      - key: TRADE_AMOUNT_SOL_DANGER
+        sync: false
+      - key: SLIPPAGE_BPS
+        sync: false
+      - key: TRAILING_STOP_LOSS_PERCENT
+        sync: false
+      - key: STALE_DANGER_COIN_MINUTES
+        sync: false
+      - key: DEEP_LOSS_PERCENT_DANGER
+        sync: false
+      - key: GLOBAL_STOP_LOSS_USD
+        sync: false
+      - key: TAKE_PROFIT_PERCENT_DANGER
+        sync: false
+      - key: TAKE_PROFIT_PERCENT_WARNING
+        sync: false
+      - key: GOOD_TP_1_PERCENT
+        sync: false
+      - key: GOOD_TP_1_SELL_PERCENT
+        sync: false
+      - key: GOOD_TP_2_PERCENT
+        sync: false
+      - key: GOOD_TP_2_SELL_PERCENT
+        sync: false
+      - key: GOOD_TP_3_PERCENT
+        sync: false
+      - key: GOOD_TP_3_SELL_PERCENT
+        sync: false
+      - key: CLOSE_ATA_DELAY_MS
+        sync: false
+      - key: METEORA_ENABLED
+        sync: false
+      - key: RAYDIUM_ENABLED
+        sync: false
+      - key: DETECTION_MODE
+        sync: false
