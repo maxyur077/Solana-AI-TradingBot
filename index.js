@@ -110,14 +110,15 @@ async function processNewPool(
       return;
     }
 
-    // Pass creator address for real-time monitoring after purchase
+    // Pass creator address and history for real-time monitoring after purchase
     await buyToken(
       mintAddress,
       rugCheckReport.risk.level,
       metadata,
       poolAddress,
       source,
-      rugCheckReport.creatorAddress
+      rugCheckReport.creatorAddress,
+      rugCheckReport.creatorHistory
     );
   } catch (error) {
     await logEvent("ERROR", `Error processing new pool from ${source}:`, {
@@ -379,7 +380,7 @@ async function main() {
   );
 
   await logEvent("INFO", `Wallet: ${WALLET_KEYPAIR.publicKey.toBase58()}`);
-  await sendStartupNotification(WALLET_KEYPAIR.publicKey.toBase58());
+  await sendStartupNotification(WALLET_KEYPAIR.publicKey.toBase58(), getTotalPnlUsd());
 
   startServer();
 
