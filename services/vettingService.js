@@ -30,6 +30,10 @@ import { RISK_LEVELS } from "../utils/constants.js";
 // Cache for known ruggers to avoid repeated checks
 const knownRuggersCache = new Map(); // walletAddress -> { isRugger: boolean, tokens: [], checkedAt: timestamp }
 
+// Cache for creator history to avoid repeated API calls
+const creatorHistoryCache = new Map(); // creatorAddress -> { passed: boolean, data: {...}, checkedAt: timestamp }
+const CREATOR_CACHE_DURATION_MS = 30 * 60 * 1000; // Cache for 30 minutes
+
 export async function getTokenMetadata(mintAddress) {
   try {
     const response = await fetch(RPC_URL, {
@@ -1005,6 +1009,18 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
     };
   }
 
+  // ========================================
+  // CHECK CACHE FIRST (Avoid repeated API calls)
+  // ========================================
+  const cached = creatorHistoryCache.get(creatorAddress);
+  if (cached && Date.now() - cached.checkedAt < CREATOR_CACHE_DURATION_MS) {
+    await logEvent("INFO", `Using cached creator history for ${creatorAddress.slice(0, 8)}...`, {
+      cacheAge: Math.floor((Date.now() - cached.checkedAt) / 1000) + "s",
+      passed: cached.passed,
+    });
+    return cached;
+  }
+
   try {
     // Use Helius DAS API to get assets created by this wallet
     const response = await fetch(RPC_URL, {
@@ -1069,11 +1085,11 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
     // ========================================
     // CRITICAL CHECK #2: TOKEN SURVIVAL TIME
     // ========================================
-    // Check each previous token (limit to first 5 to avoid rate limits)
-    for (const token of previousTokens.slice(0, 5)) {
+    // Check each previous token (limit to first 3 to avoid rate limits)
+    for (const token of previousTokens.slice(0, 3)) {
       try {
-        // Small delay to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        // Longer delay to avoid rate limiting (increased from 300ms to 1000ms)
+        await new Promise((resolve) => setTimeout(resolve, 1000));
 
         const rugReport = await axios.get(
           `https://api.rugcheck.xyz/v1/tokens/${token.id}/report`,
@@ -1214,24 +1230,54 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
       tokenAnalysis,
     });
 
-    return {
+    const result = {
       passed: true,
       previousTokens: previousTokens.length,
       ruggedCount,
       deadCount,
       quickRugCount,
       tokenAnalysis,
+      checkedAt: Date.now(),
     };
+
+    // Cache the successful result
+    creatorHistoryCache.set(creatorAddress, result);
+
+    return result;
   } catch (error) {
+    // Check if this is a rate limit error (429)
+    if (error.response?.status === 429 || error.message?.includes("429") || error.message?.includes("Too Many Requests")) {
+      await logEvent("WARN", "Rate limit hit while checking creator history. Caching negative result temporarily.", {
+        error: error.message,
+        creator: creatorAddress.slice(0, 8) + "...",
+      });
+
+      // Cache negative result for 5 minutes to avoid hammering the API
+      const result = {
+        passed: false,
+        reason: "Rate limited - try again later",
+        checkedAt: Date.now(),
+      };
+      creatorHistoryCache.set(creatorAddress, result);
+      return result;
+    }
+
     await logEvent("ERROR", "Error checking creator token history", {
       error: error.message,
       creator: creatorAddress,
     });
+
     // FAIL-SAFE: On error, REJECT to be safe (don't let suspicious tokens through)
-    return {
+    const result = {
       passed: false,
-      reason: `Failed to verify creator history: ${error.message}`
+      reason: `Failed to verify creator history: ${error.message}`,
+      checkedAt: Date.now(),
     };
+
+    // Cache the failure for 5 minutes
+    creatorHistoryCache.set(creatorAddress, result);
+
+    return result;
   }
 }
 
