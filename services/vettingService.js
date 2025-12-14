@@ -19,6 +19,8 @@ import {
   MAX_BUNDLED_TX_INSTRUCTIONS,
   CHECK_CREATOR_HISTORY,
   MAX_CREATOR_RUGGED_TOKENS,
+  MIN_CREATOR_PREVIOUS_TOKENS,
+  MIN_TOKEN_SURVIVAL_MINUTES,
 } from "../config.js";
 import { connection } from "./solanaService.js";
 import { PublicKey } from "@solana/web3.js";
@@ -973,11 +975,34 @@ async function checkBundledCreation(mintAddress) {
 
 /**
  * CHECK: Creator token history via Helius
- * Checks if the creator has deployed tokens before that got rugged or have 0 liquidity
+ *
+ * NEW ENHANCED LOGIC (12+ years experience implementation):
+ * 1. REJECT brand new wallets (no previous tokens) - high risk of scammers
+ * 2. For existing wallets, verify previous tokens survived >= 10 minutes
+ * 3. REJECT if any previous token was quick-rugged (< 10 min lifespan)
+ *
+ * This prevents both:
+ * - New scammer wallets launching their first rug
+ * - Serial ruggers who quick-rug tokens repeatedly
  */
 async function checkCreatorTokenHistory(creatorAddress, currentMint) {
-  if (!CHECK_CREATOR_HISTORY || !creatorAddress) {
+  // If creator history check is disabled, skip
+  if (!CHECK_CREATOR_HISTORY) {
     return { passed: true };
+  }
+
+  // ========================================
+  // CRITICAL: REJECT IF CREATOR NOT FOUND
+  // ========================================
+  if (!creatorAddress) {
+    await logEvent("ERROR", `🚫 VETTING FAILED: Creator address could not be determined!`, {
+      mint: currentMint.slice(0, 8) + "...",
+      reason: "Cannot verify wallet history - too risky",
+    });
+    return {
+      passed: false,
+      reason: "Creator address not found - cannot verify wallet history"
+    };
   }
 
   try {
@@ -999,75 +1024,172 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
 
     const data = await response.json();
 
+    // ========================================
+    // CRITICAL CHECK #1: REJECT NEW WALLETS
+    // ========================================
     if (!data.result?.items || data.result.items.length === 0) {
-      await logEvent("INFO", `Creator has no previous tokens`, {
+      await logEvent("WARN", `🚫 VETTING FAILED: Creator wallet is BRAND NEW (no previous tokens)`, {
         creator: creatorAddress.slice(0, 8) + "...",
+        reason: "New wallets are high-risk for scams",
+        minRequired: MIN_CREATOR_PREVIOUS_TOKENS,
       });
-      return { passed: true, previousTokens: 0 };
+      return {
+        passed: false,
+        reason: `Creator wallet is brand new (0 tokens). Minimum required: ${MIN_CREATOR_PREVIOUS_TOKENS}`,
+        previousTokens: 0
+      };
     }
 
     const previousTokens = data.result.items.filter(
       (item) => item.id !== currentMint
     );
 
-    if (previousTokens.length === 0) {
-      return { passed: true, previousTokens: 0 };
+    // Check if creator has minimum number of previous tokens
+    if (previousTokens.length < MIN_CREATOR_PREVIOUS_TOKENS) {
+      await logEvent("WARN", `🚫 VETTING FAILED: Creator has only ${previousTokens.length} previous token(s)`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+        minRequired: MIN_CREATOR_PREVIOUS_TOKENS,
+      });
+      return {
+        passed: false,
+        reason: `Creator has only ${previousTokens.length} token(s). Minimum required: ${MIN_CREATOR_PREVIOUS_TOKENS}`,
+        previousTokens: previousTokens.length
+      };
     }
 
-    await logEvent("INFO", `Checking creator's ${previousTokens.length} previous token(s)...`, {
+    await logEvent("INFO", `✅ Creator has ${previousTokens.length} previous token(s). Checking survival times...`, {
       creator: creatorAddress.slice(0, 8) + "...",
     });
 
     let ruggedCount = 0;
     let deadCount = 0;
-    const ruggedTokens = [];
+    let quickRugCount = 0; // Tokens rugged within 10 minutes
+    const tokenAnalysis = [];
 
+    // ========================================
+    // CRITICAL CHECK #2: TOKEN SURVIVAL TIME
+    // ========================================
     // Check each previous token (limit to first 5 to avoid rate limits)
     for (const token of previousTokens.slice(0, 5)) {
       try {
         // Small delay to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await new Promise((resolve) => setTimeout(resolve, 300));
 
         const rugReport = await axios.get(
           `https://api.rugcheck.xyz/v1/tokens/${token.id}/report`,
-          { timeout: 5000 }
+          { timeout: 8000 }
         );
 
         if (rugReport.data) {
           const isRugged = rugReport.data.rugged === true;
           const isDead = (rugReport.data.totalMarketLiquidity || 0) < 100;
+          const detectedAt = rugReport.data.detectedAt;
 
+          // Calculate token lifespan if we have creation time
+          let tokenLifespanMinutes = null;
+          let wasQuickRug = false;
+
+          if (detectedAt && isRugged) {
+            try {
+              const creationTime = new Date(detectedAt).getTime();
+              const currentTime = Date.now();
+
+              // Get token's first and last transaction to determine when it died
+              const mintPubKey = new PublicKey(token.id);
+              const signatures = await connection.getSignaturesForAddress(mintPubKey, { limit: 1 });
+
+              if (signatures && signatures.length > 0) {
+                const lastTxTime = signatures[0].blockTime * 1000;
+                tokenLifespanMinutes = (lastTxTime - creationTime) / (1000 * 60);
+
+                // Check if it was quick-rugged (died within MIN_TOKEN_SURVIVAL_MINUTES)
+                wasQuickRug = tokenLifespanMinutes < MIN_TOKEN_SURVIVAL_MINUTES;
+
+                if (wasQuickRug) {
+                  quickRugCount++;
+                }
+              }
+            } catch (lifespanError) {
+              // If we can't determine lifespan, assume it's suspicious
+              await logEvent("WARN", `Could not determine lifespan for token ${token.id.slice(0, 8)}`, {
+                error: lifespanError.message,
+              });
+            }
+          }
+
+          // Track all rugged/dead tokens
           if (isRugged) {
             ruggedCount++;
-            ruggedTokens.push({
+            tokenAnalysis.push({
               mint: token.id.slice(0, 8) + "...",
-              status: "RUGGED",
+              status: wasQuickRug ? "QUICK RUG (<10 min)" : "RUGGED",
+              lifespanMinutes: tokenLifespanMinutes?.toFixed(1) || "unknown",
+              isQuickRug: wasQuickRug,
             });
           } else if (isDead) {
             deadCount++;
-            ruggedTokens.push({
+            tokenAnalysis.push({
               mint: token.id.slice(0, 8) + "...",
               status: "DEAD (no liquidity)",
+              lifespanMinutes: tokenLifespanMinutes?.toFixed(1) || "unknown",
+              isQuickRug: false,
+            });
+          } else {
+            // Token is healthy - this is GOOD
+            tokenAnalysis.push({
+              mint: token.id.slice(0, 8) + "...",
+              status: "ACTIVE/HEALTHY",
+              lifespanMinutes: "ongoing",
+              isQuickRug: false,
             });
           }
         }
       } catch (tokenError) {
-        // Skip tokens that fail to fetch
+        // Log error but continue checking other tokens
+        await logEvent("WARN", `Failed to check token ${token.id.slice(0, 8)}: ${tokenError.message}`);
         continue;
       }
     }
 
+    // ========================================
+    // CRITICAL CHECK #3: REJECT QUICK RUGGERS
+    // ========================================
+    if (quickRugCount > 0) {
+      await logEvent(
+        "ERROR",
+        `🚫 VETTING FAILED: Creator has ${quickRugCount} QUICK-RUGGED token(s) (died < ${MIN_TOKEN_SURVIVAL_MINUTES} min)!`,
+        {
+          creator: creatorAddress.slice(0, 8) + "...",
+          quickRugCount,
+          totalBadTokens: ruggedCount + deadCount,
+          tokenAnalysis,
+        }
+      );
+      return {
+        passed: false,
+        reason: `Creator quick-rugged ${quickRugCount} token(s) within ${MIN_TOKEN_SURVIVAL_MINUTES} minutes`,
+        quickRugCount,
+        ruggedCount,
+        deadCount,
+        tokenAnalysis,
+      };
+    }
+
+    // ========================================
+    // EXISTING CHECK: TOTAL RUGGED COUNT
+    // ========================================
     const totalBadTokens = ruggedCount + deadCount;
 
     if (totalBadTokens > MAX_CREATOR_RUGGED_TOKENS) {
       await logEvent(
         "WARN",
-        `Creator has ${totalBadTokens} rugged/dead token(s)!`,
+        `🚫 VETTING FAILED: Creator has ${totalBadTokens} rugged/dead token(s)!`,
         {
           creator: creatorAddress.slice(0, 8) + "...",
           ruggedCount,
           deadCount,
-          ruggedTokens,
+          maxAllowed: MAX_CREATOR_RUGGED_TOKENS,
+          tokenAnalysis,
         }
       );
       return {
@@ -1075,15 +1197,21 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
         reason: `Creator has ${totalBadTokens} rugged/dead token(s) (max: ${MAX_CREATOR_RUGGED_TOKENS})`,
         ruggedCount,
         deadCount,
-        ruggedTokens,
+        tokenAnalysis,
       };
     }
 
-    await logEvent("INFO", `Creator history check passed`, {
+    // ========================================
+    // ALL CHECKS PASSED - CREATOR IS TRUSTED
+    // ========================================
+    await logEvent("SUCCESS", `✅ Creator history check PASSED - Wallet has proven track record`, {
       creator: creatorAddress.slice(0, 8) + "...",
       previousTokens: previousTokens.length,
       ruggedCount,
       deadCount,
+      quickRugCount,
+      healthyTokens: previousTokens.length - ruggedCount - deadCount,
+      tokenAnalysis,
     });
 
     return {
@@ -1091,13 +1219,19 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
       previousTokens: previousTokens.length,
       ruggedCount,
       deadCount,
+      quickRugCount,
+      tokenAnalysis,
     };
   } catch (error) {
-    await logEvent("WARN", "Error checking creator token history", {
+    await logEvent("ERROR", "Error checking creator token history", {
       error: error.message,
       creator: creatorAddress,
     });
-    return { passed: true }; // Don't fail on error
+    // FAIL-SAFE: On error, REJECT to be safe (don't let suspicious tokens through)
+    return {
+      passed: false,
+      reason: `Failed to verify creator history: ${error.message}`
+    };
   }
 }
 
@@ -1330,11 +1464,18 @@ export async function checkRug(mintAddress) {
         return null;
       }
     } else {
+      // ========================================
+      // CRITICAL: REJECT IF CREATOR NOT FOUND
+      // ========================================
       await logEvent(
-        "WARN",
-        `Could not perform creator checks. Creator address not found.`,
-        { mint: mintAddress }
+        "ERROR",
+        `🚫 VETTING FAILED: Creator address could not be determined!`,
+        {
+          mint: mintAddress,
+          reason: "Cannot verify wallet history - too risky to buy anonymous tokens"
+        }
       );
+      return null; // REJECT - No creator means we can't verify wallet experience
     }
 
     // CHECK 3: Are TOP HOLDERS dumping within 10 min?

@@ -22,6 +22,11 @@ async function sendMessage(text) {
   }
 }
 
+// Export for direct use
+export async function sendTelegramMessage(text) {
+  return await sendMessage(text);
+}
+
 export async function sendBuyNotification(metadata, solAmount, signature) {
   const message = `
 🚀 **New Buy!** 🚀

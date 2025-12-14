@@ -36,6 +36,7 @@ import fetch from "cross-fetch";
 const portfolio = new Map();
 const activeMonitors = new Map();
 let totalPnlUsd = 0;
+let tradingEnabled = true; // Trading state flag
 
 let onPortfolioFullCallback = null;
 let onPortfolioAvailableCallback = null;
@@ -59,6 +60,20 @@ export function getPortfolio() {
 
 export function isPortfolioFull() {
   return portfolio.size >= MAX_PORTFOLIO_SIZE;
+}
+
+export function isTradingEnabled() {
+  return tradingEnabled;
+}
+
+export function pauseTrading(reason = "Global stop loss triggered") {
+  tradingEnabled = false;
+  logEvent("WARN", `🚫 TRADING PAUSED: ${reason}`, { tradingEnabled: false });
+}
+
+export function resumeTrading(reason = "Manually resumed") {
+  tradingEnabled = true;
+  logEvent("SUCCESS", `✅ TRADING RESUMED: ${reason}`, { tradingEnabled: true });
 }
 
 async function checkAndNotifyPortfolioStatus() {
@@ -150,6 +165,14 @@ async function executeMeteoraBuy(mintAddress, tradeAmountSol, poolAddress) {
 }
 
 export async function buyToken(mintAddress, riskLevel, metadata, poolAddress = null, dexSource = null, creatorAddress = null) {
+  // Check if trading is enabled
+  if (!tradingEnabled) {
+    await logEvent("WARN", `Trading is paused. Skipping buy for ${mintAddress}`, {
+      tradingEnabled: false,
+    });
+    return false;
+  }
+
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
   // Only use direct Meteora swap for DAMM v2 - DLMM should go through Jupiter
   const isMeteoraDammV2 = dexSource === "meteora-damm_v2" || dexSource === "meteora-damm-v2";

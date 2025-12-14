@@ -21,6 +21,9 @@ import {
   getPortfolio,
   startRealtimeMonitoringForAllPositions,
   setPortfolioCallbacks,
+  isTradingEnabled,
+  pauseTrading,
+  resumeTrading,
 } from "./services/tradeService.js";
 import { initTrailingStopService } from "./services/realtimeTrailingStopService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
@@ -247,6 +250,7 @@ function startServer() {
     const subscriptionStatus = getSubscriptionStatus();
     res.status(200).json({
       status: "OK",
+      tradingEnabled: isTradingEnabled(),
       portfolioSize: getPortfolioSize(),
       totalPnlUsd: getTotalPnlUsd().toFixed(4),
       detectionMode: DETECTION_MODE,
@@ -261,10 +265,47 @@ function startServer() {
     res.status(200).json(status);
   });
 
+  // Endpoint to pause trading manually
+  app.post("/pause-trading", async (req, res) => {
+    const reason = req.body.reason || "Manually paused via API";
+    await pauseTrading(reason);
+    res.status(200).json({
+      success: true,
+      tradingEnabled: false,
+      message: "Trading paused successfully",
+      reason,
+    });
+  });
+
+  // Endpoint to resume trading manually
+  app.post("/resume-trading", async (req, res) => {
+    const reason = req.body.reason || "Manually resumed via API";
+    await resumeTrading(reason);
+    res.status(200).json({
+      success: true,
+      tradingEnabled: true,
+      message: "Trading resumed successfully",
+      reason,
+    });
+  });
+
+  // Endpoint to get trading status
+  app.get("/trading-status", async (req, res) => {
+    res.status(200).json({
+      tradingEnabled: isTradingEnabled(),
+      totalPnlUsd: getTotalPnlUsd().toFixed(4),
+      portfolioSize: getPortfolioSize(),
+      globalStopLoss: GLOBAL_STOP_LOSS_USD,
+    });
+  });
+
   const port = process.env.PORT || 3000;
   app.listen(port, () => {
     logEvent("INFO", `Server started on port ${port}`);
     logEvent("INFO", `Health check: http://localhost:${port}/health`);
+    logEvent("INFO", `Trading status: http://localhost:${port}/trading-status`);
+    logEvent("INFO", `Pause trading: POST http://localhost:${port}/pause-trading`);
+    logEvent("INFO", `Resume trading: POST http://localhost:${port}/resume-trading`);
     if (WEBHOOK_ENABLED) {
       logEvent(
         "INFO",
@@ -349,13 +390,25 @@ async function main() {
     await monitorPortfolio();
 
     const currentPnl = getTotalPnlUsd();
-    if (currentPnl <= GLOBAL_STOP_LOSS_USD) {
+    if (currentPnl <= GLOBAL_STOP_LOSS_USD && isTradingEnabled()) {
       await logEvent(
         "ERROR",
-        "GLOBAL STOP-LOSS TRIGGERED! Shutting down bot.",
-        { totalPnlUsd: currentPnl }
+        "🚨 GLOBAL STOP-LOSS TRIGGERED! Pausing trading to prevent further losses.",
+        { totalPnlUsd: currentPnl, threshold: GLOBAL_STOP_LOSS_USD }
       );
-      process.exit(1);
+      await pauseTrading(`Global stop loss hit (PnL: $${currentPnl.toFixed(4)})`);
+
+      // Send Telegram notification about trading pause
+      const { sendTelegramMessage } = await import("./services/telegramService.js");
+      await sendTelegramMessage(
+        `🚨 GLOBAL STOP-LOSS TRIGGERED!\n\n` +
+        `Total PnL: $${currentPnl.toFixed(4)}\n` +
+        `Threshold: $${GLOBAL_STOP_LOSS_USD}\n\n` +
+        `⏸️ Trading is now PAUSED\n` +
+        `✅ Monitoring will continue\n` +
+        `📊 Existing positions will be managed\n\n` +
+        `Bot will NOT take new trades until manually resumed.`
+      );
     }
   }, 15000);
 }

@@ -117,6 +117,14 @@ export const MAX_CREATOR_RUGGED_TOKENS = parseInt(
   loadEnvVariable("MAX_CREATOR_RUGGED_TOKENS", "0", false),
   10
 );
+export const MIN_CREATOR_PREVIOUS_TOKENS = parseInt(
+  loadEnvVariable("MIN_CREATOR_PREVIOUS_TOKENS", "1", false),
+  10
+);
+export const MIN_TOKEN_SURVIVAL_MINUTES = parseInt(
+  loadEnvVariable("MIN_TOKEN_SURVIVAL_MINUTES", "10", false),
+  10
+);
 
 export const TRADE_AMOUNTS = {
   GOOD: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_GOOD")),
