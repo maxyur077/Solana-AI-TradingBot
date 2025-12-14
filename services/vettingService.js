@@ -1080,6 +1080,7 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
     let ruggedCount = 0;
     let deadCount = 0;
     let quickRugCount = 0; // Tokens rugged within 10 minutes
+    let survivedCount = 0; // Tokens that survived >10 minutes
     const tokenAnalysis = [];
 
     // ========================================
@@ -1142,6 +1143,10 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
               lifespanMinutes: tokenLifespanMinutes?.toFixed(1) || "unknown",
               isQuickRug: wasQuickRug,
             });
+            // Count as survived if it lasted >10 minutes even if rugged later
+            if (!wasQuickRug && tokenLifespanMinutes && tokenLifespanMinutes > MIN_TOKEN_SURVIVAL_MINUTES) {
+              survivedCount++;
+            }
           } else if (isDead) {
             deadCount++;
             tokenAnalysis.push({
@@ -1150,8 +1155,13 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
               lifespanMinutes: tokenLifespanMinutes?.toFixed(1) || "unknown",
               isQuickRug: false,
             });
+            // Count as survived if it lasted >10 minutes even if dead now
+            if (tokenLifespanMinutes && tokenLifespanMinutes > MIN_TOKEN_SURVIVAL_MINUTES) {
+              survivedCount++;
+            }
           } else {
-            // Token is healthy - this is GOOD
+            // Token is healthy - this is GOOD and counts as survived
+            survivedCount++;
             tokenAnalysis.push({
               mint: token.id.slice(0, 8) + "...",
               status: "ACTIVE/HEALTHY",
@@ -1168,7 +1178,33 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
     }
 
     // ========================================
-    // CRITICAL CHECK #3: REJECT QUICK RUGGERS
+    // CRITICAL CHECK #3: REQUIRE 2+ COINS SURVIVED >10 MINUTES
+    // ========================================
+    const MIN_SURVIVED_TOKENS = 2;
+    if (survivedCount < MIN_SURVIVED_TOKENS) {
+      await logEvent(
+        "ERROR",
+        `🚫 VETTING FAILED: Creator needs ${MIN_SURVIVED_TOKENS}+ coins that survived >${MIN_TOKEN_SURVIVAL_MINUTES} min. Only ${survivedCount} survived.`,
+        {
+          creator: creatorAddress.slice(0, 8) + "...",
+          survivedCount,
+          minRequired: MIN_SURVIVED_TOKENS,
+          tokenAnalysis,
+        }
+      );
+      return {
+        passed: false,
+        reason: `Creator only has ${survivedCount} coin(s) that survived >${MIN_TOKEN_SURVIVAL_MINUTES} minutes (minimum: ${MIN_SURVIVED_TOKENS})`,
+        survivedCount,
+        quickRugCount,
+        ruggedCount,
+        deadCount,
+        tokenAnalysis,
+      };
+    }
+
+    // ========================================
+    // CRITICAL CHECK #4: REJECT QUICK RUGGERS
     // ========================================
     if (quickRugCount > 0) {
       await logEvent(
@@ -1187,6 +1223,7 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
         quickRugCount,
         ruggedCount,
         deadCount,
+        survivedCount,
         tokenAnalysis,
       };
     }
@@ -1223,6 +1260,7 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
     await logEvent("SUCCESS", `✅ Creator history check PASSED - Wallet has proven track record`, {
       creator: creatorAddress.slice(0, 8) + "...",
       previousTokens: previousTokens.length,
+      survivedCount,
       ruggedCount,
       deadCount,
       quickRugCount,
@@ -1233,6 +1271,7 @@ async function checkCreatorTokenHistory(creatorAddress, currentMint) {
     const result = {
       passed: true,
       previousTokens: previousTokens.length,
+      survivedCount,
       ruggedCount,
       deadCount,
       quickRugCount,
@@ -1550,6 +1589,12 @@ export async function checkRug(mintAddress) {
       lpLockedPct: lpCheck.lpLockedPct,
       liquidity: report.totalMarketLiquidity,
       creatorAddress: creatorAddress || null, // Include creator for post-purchase monitoring
+      creatorHistory: creatorHistoryCheck?.passed ? {
+        previousTokens: creatorHistoryCheck.previousTokens || 0,
+        survivedCount: creatorHistoryCheck.survivedCount || 0,
+        ruggedCount: creatorHistoryCheck.ruggedCount || 0,
+        tokenAnalysis: creatorHistoryCheck.tokenAnalysis || [],
+      } : null,
     };
 
     await logEvent("SUCCESS", `Vetting passed for token.`, {

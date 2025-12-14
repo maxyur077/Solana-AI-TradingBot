@@ -23,7 +23,7 @@ import {
 } from "../config.js";
 import { sendAndConfirmTransaction, getTokenPriceInSol, connection, getSolPriceUsd } from "./solanaService.js";
 import { logEvent, logTrade, addPurchasedToken, updateTradeStatus } from "./databaseService.js";
-import { sendBuyNotification, sendSellNotification } from "./telegramService.js";
+import { sendBuyNotification, sendSellNotification, sendRuggedNotification } from "./telegramService.js";
 import { startTrailingStopMonitor, stopTrailingStopMonitor, isBeingMonitored } from "./realtimeTrailingStopService.js";
 import { swapOnMeteora, sellOnMeteora, findMeteoraPool, getMeteoraTokenPrice } from "./meteoraSwapService.js";
 import { unsubscribeFromMeteora, subscribeToMeteora } from "./dexManager.js";
@@ -164,7 +164,7 @@ async function executeMeteoraBuy(mintAddress, tradeAmountSol, poolAddress) {
   return { success: false };
 }
 
-export async function buyToken(mintAddress, riskLevel, metadata, poolAddress = null, dexSource = null, creatorAddress = null) {
+export async function buyToken(mintAddress, riskLevel, metadata, poolAddress = null, dexSource = null, creatorAddress = null, creatorHistory = null) {
   // Check if trading is enabled
   if (!tradingEnabled) {
     await logEvent("WARN", `Trading is paused. Skipping buy for ${mintAddress}`, {
@@ -306,7 +306,7 @@ export async function buyToken(mintAddress, riskLevel, metadata, poolAddress = n
 
   await addPurchasedToken(mintAddress);
   await logTrade("BUY", mintAddress, tradeAmountSol, finalPrice, buyResult.fee, buyResult.signature, totalPnlUsd, finalDexSource);
-  await sendBuyNotification(metadata, tradeAmountSol, buyResult.signature);
+  await sendBuyNotification(metadata, tradeAmountSol, buyResult.signature, totalPnlUsd, creatorHistory);
 
   const monitor = startTrailingStopMonitor(
     mintAddress,
@@ -453,6 +453,15 @@ export async function sellToken(mintAddress, sellPercentage) {
     const timeHeldMinutes = (Date.now() - position.purchaseTimestamp) / 60000;
     if (timeHeldMinutes >= 8) {
       await logEvent("ERROR", `🚨 ASSUMED RUGGED: ${mintAddress} held for ${timeHeldMinutes.toFixed(1)} min and cannot be sold. Removing from portfolio.`, null, totalPnlUsd);
+
+      // Calculate and record loss
+      const solPrice = await getSolPriceUsd();
+      const lossUsd = position.tradeAmountSol * solPrice;
+      totalPnlUsd -= lossUsd;
+
+      // Send Telegram notification
+      await sendRuggedNotification(mintAddress, lossUsd, totalPnlUsd, `Held for ${timeHeldMinutes.toFixed(1)} min and cannot be sold`);
+
       stopTrailingStopMonitor(mintAddress);
       await stopCreatorMonitor(mintAddress, "Assumed rugged - cannot sell");
       await stopPoolReserveMonitor(mintAddress, "Assumed rugged - cannot sell");
@@ -584,8 +593,34 @@ export async function monitorPortfolio() {
         continue;
       }
 
-      await logEvent("WARN", `Price for ${mintAddress} is zero after ${timeHeldMinutes.toFixed(1)} min. Attempting to sell 100%.`, null, totalPnlUsd);
-      await sellToken(mintAddress, 100);
+      // Price unavailable for 5+ minutes - assume rugged, mark as loss
+      await logEvent("ERROR", `🚨 PRICE UNAVAILABLE for ${timeHeldMinutes.toFixed(1)} min. Assuming rugged. Marking as loss.`, null, totalPnlUsd);
+
+      // Calculate loss (full trade amount lost)
+      const solPrice = await getSolPriceUsd();
+      const lossUsd = position.tradeAmountSol * solPrice;
+      totalPnlUsd -= lossUsd;
+
+      await logEvent("ERROR", `💸 Loss recorded: -$${lossUsd.toFixed(4)} | Total PnL: $${totalPnlUsd.toFixed(4)}`, {
+        mint: mintAddress,
+        tradeAmountSol: position.tradeAmountSol,
+        lossUsd: lossUsd.toFixed(4),
+      }, totalPnlUsd);
+
+      // Send Telegram notification
+      await sendRuggedNotification(mintAddress, lossUsd, totalPnlUsd, `Price unavailable for ${timeHeldMinutes.toFixed(1)} minutes`);
+
+      // Log the loss trade
+      await logTrade("RUGGED", mintAddress, 0, position.purchasePrice, 0, position.buySignature, totalPnlUsd, position.dexSource);
+
+      // Clean up monitors and remove from portfolio
+      stopTrailingStopMonitor(mintAddress);
+      await stopCreatorMonitor(mintAddress, "Price unavailable - assumed rugged");
+      await stopPoolReserveMonitor(mintAddress, "Price unavailable - assumed rugged");
+      activeMonitors.delete(mintAddress);
+      portfolio.delete(mintAddress);
+      await updateTradeStatus(position.buySignature, "RUGGED");
+      await checkAndNotifyPortfolioAvailable();
       continue;
     }
 
@@ -657,6 +692,15 @@ export async function monitorPortfolio() {
       const sold = await sellToken(mintAddress, 100);
       if (!sold && portfolio.has(mintAddress)) {
         await logEvent("ERROR", `🚨 ASSUMED RUGGED: ${mintAddress} cannot be sold after 8 min. Force removing from portfolio.`, null, totalPnlUsd);
+
+        // Calculate and record loss
+        const solPrice = await getSolPriceUsd();
+        const lossUsd = position.tradeAmountSol * solPrice;
+        totalPnlUsd -= lossUsd;
+
+        // Send Telegram notification
+        await sendRuggedNotification(mintAddress, lossUsd, totalPnlUsd, `Cannot be sold after ${timeHeldMins.toFixed(1)} minutes`);
+
         stopTrailingStopMonitor(mintAddress);
         await stopCreatorMonitor(mintAddress, "Assumed rugged after 8 min");
         await stopPoolReserveMonitor(mintAddress, "Assumed rugged after 8 min");
