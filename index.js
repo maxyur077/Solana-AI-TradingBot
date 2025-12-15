@@ -22,6 +22,7 @@ import {
   startRealtimeMonitoringForAllPositions,
   setPortfolioCallbacks,
   pauseTrading,
+  resumeTrading,
   isTradingPaused,
 } from "./services/tradeService.js";
 import { initTrailingStopService } from "./services/realtimeTrailingStopService.js";
@@ -32,7 +33,7 @@ import {
   hasBeenPurchased,
   loadActiveTrades,
 } from "./services/databaseService.js";
-import { sendStartupNotification } from "./services/telegramService.js";
+import { sendStartupNotification, sendHourlyProfitReport } from "./services/telegramService.js";
 import {
   setupWebhookReceiver,
   setNewPoolCallback,
@@ -401,6 +402,12 @@ async function main() {
       process.exit(1);
     }
   }, 15000);
+
+  // Send hourly profit reports
+  setInterval(async () => {
+    await logEvent("INFO", "Sending hourly profit report...");
+    await sendHourlyProfitReport();
+  }, 3600000); // Run every hour (3600000 ms)
 }
 
 process.on("SIGINT", async () => {

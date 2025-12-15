@@ -180,3 +180,76 @@ export async function getRecentTrades(limit = 10) {
     return [];
   }
 }
+
+export async function calculateTotalProfitFromDatabase() {
+  try {
+    // Get all BUY trades and sum the SOL spent
+    const buyResult = await db.get(
+      "SELECT SUM(sol_amount) as total_spent FROM trades WHERE trade_type = 'BUY'"
+    );
+    const totalSolSpent = buyResult?.total_spent || 0;
+
+    // Get all SELL trades and sum the SOL received
+    const sellResult = await db.get(
+      "SELECT SUM(sol_amount) as total_received FROM trades WHERE trade_type = 'SELL'"
+    );
+    const totalSolReceived = sellResult?.total_received || 0;
+
+    // Calculate profit in SOL
+    const profitInSol = totalSolReceived - totalSolSpent;
+
+    return {
+      totalSolSpent,
+      totalSolReceived,
+      profitInSol,
+      buyCount: await db.get("SELECT COUNT(*) as count FROM trades WHERE trade_type = 'BUY'").then(r => r?.count || 0),
+      sellCount: await db.get("SELECT COUNT(*) as count FROM trades WHERE trade_type = 'SELL'").then(r => r?.count || 0),
+    };
+  } catch (error) {
+    await logEvent("ERROR", "Failed to calculate total profit from database", { error: error.message });
+    return {
+      totalSolSpent: 0,
+      totalSolReceived: 0,
+      profitInSol: 0,
+      buyCount: 0,
+      sellCount: 0,
+    };
+  }
+}
+
+export async function getTradesInLastHour() {
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    const buyResult = await db.get(
+      "SELECT SUM(sol_amount) as total_spent, COUNT(*) as count FROM trades WHERE trade_type = 'BUY' AND timestamp >= ?",
+      [oneHourAgo]
+    );
+
+    const sellResult = await db.get(
+      "SELECT SUM(sol_amount) as total_received, COUNT(*) as count FROM trades WHERE trade_type = 'SELL' AND timestamp >= ?",
+      [oneHourAgo]
+    );
+
+    const totalSolSpent = buyResult?.total_spent || 0;
+    const totalSolReceived = sellResult?.total_received || 0;
+    const profitInSol = totalSolReceived - totalSolSpent;
+
+    return {
+      totalSolSpent,
+      totalSolReceived,
+      profitInSol,
+      buyCount: buyResult?.count || 0,
+      sellCount: sellResult?.count || 0,
+    };
+  } catch (error) {
+    await logEvent("ERROR", "Failed to get trades from last hour", { error: error.message });
+    return {
+      totalSolSpent: 0,
+      totalSolReceived: 0,
+      profitInSol: 0,
+      buyCount: 0,
+      sellCount: 0,
+    };
+  }
+}
