@@ -77,3 +77,26 @@ The bot is now live and monitoring for opportunities.
     `;
   await sendMessage(message);
 }
+
+export async function sendTradingPausedNotification(totalPnl) {
+  const message = `
+🚫 **TRADING PAUSED** 🚫
+*Reason:* Total PnL dropped below -$1.00
+*Current PnL:* $${totalPnl.toFixed(4)}
+
+The bot will continue monitoring existing positions but will NOT take new trades.
+
+To resume trading, use the /resume endpoint or restart the bot.
+    `;
+  await sendMessage(message);
+}
+
+export async function sendTradingResumedNotification(totalPnl) {
+  const message = `
+✅ **TRADING RESUMED** ✅
+*Current PnL:* $${totalPnl.toFixed(4)}
+
+The bot will now resume taking new trades.
+    `;
+  await sendMessage(message);
+}

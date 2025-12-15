@@ -39,6 +39,8 @@ import {
 import {
   sendBuyNotification,
   sendSellNotification,
+  sendTradingPausedNotification,
+  sendTradingResumedNotification,
 } from "./telegramService.js";
 import {
   startTrailingStopMonitor,
@@ -71,6 +73,7 @@ import fetch from "cross-fetch";
 const portfolio = new Map();
 const activeMonitors = new Map();
 let totalPnlUsd = 0;
+let tradingPaused = false; // Pause trading when PnL drops below -$1
 
 let onPortfolioFullCallback = null;
 let onPortfolioAvailableCallback = null;
@@ -94,6 +97,26 @@ export function getPortfolio() {
 
 export function isPortfolioFull() {
   return portfolio.size >= MAX_PORTFOLIO_SIZE;
+}
+
+export function isTradingPaused() {
+  return tradingPaused;
+}
+
+export async function pauseTrading(reason = "PnL below threshold") {
+  if (tradingPaused) return; // Already paused
+
+  tradingPaused = true;
+  await logEvent("WARN", `🚫 TRADING PAUSED: ${reason}`, { totalPnlUsd }, totalPnlUsd);
+  await sendTradingPausedNotification(totalPnlUsd);
+}
+
+export async function resumeTrading() {
+  if (!tradingPaused) return; // Already active
+
+  tradingPaused = false;
+  await logEvent("SUCCESS", `✅ TRADING RESUMED by user`, { totalPnlUsd }, totalPnlUsd);
+  await sendTradingResumedNotification(totalPnlUsd);
 }
 
 async function checkAndNotifyPortfolioStatus() {
@@ -210,6 +233,12 @@ export async function buyToken(
   creatorAddress = null,
   creatorStats = null
 ) {
+  // Check if trading is paused
+  if (tradingPaused) {
+    await logEvent("WARN", `Trading is paused. Skipping buy for ${mintAddress}. Resume trading to continue.`, null, totalPnlUsd);
+    return false;
+  }
+
   const tradeAmountSol = TRADE_AMOUNTS[riskLevel] || TRADE_AMOUNTS.DANGER;
   // Only use direct Meteora swap for DAMM v2 - DLMM should go through Jupiter
   const isMeteoraDammV2 =

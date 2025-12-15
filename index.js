@@ -21,6 +21,8 @@ import {
   getPortfolio,
   startRealtimeMonitoringForAllPositions,
   setPortfolioCallbacks,
+  pauseTrading,
+  isTradingPaused,
 } from "./services/tradeService.js";
 import { initTrailingStopService } from "./services/realtimeTrailingStopService.js";
 import { getTokenMetadata, checkRug } from "./services/vettingService.js";
@@ -250,6 +252,7 @@ function startServer() {
       status: "OK",
       portfolioSize: getPortfolioSize(),
       totalPnlUsd: getTotalPnlUsd().toFixed(4),
+      tradingPaused: isTradingPaused(),
       detectionMode: DETECTION_MODE,
       dexConfig: getActiveDexConfig(),
       subscriptions: subscriptionStatus,
@@ -260,6 +263,38 @@ function startServer() {
   app.get("/rpc-status", async (req, res) => {
     const status = await getRpcHealthStatus();
     res.status(200).json(status);
+  });
+
+  app.post("/resume", async (req, res) => {
+    if (!isTradingPaused()) {
+      return res.status(400).json({
+        error: "Trading is not paused",
+        tradingPaused: false,
+      });
+    }
+
+    await resumeTrading();
+    res.status(200).json({
+      message: "Trading resumed successfully",
+      tradingPaused: false,
+      totalPnlUsd: getTotalPnlUsd().toFixed(4),
+    });
+  });
+
+  app.post("/pause", async (req, res) => {
+    if (isTradingPaused()) {
+      return res.status(400).json({
+        error: "Trading is already paused",
+        tradingPaused: true,
+      });
+    }
+
+    await pauseTrading("Manual pause by user");
+    res.status(200).json({
+      message: "Trading paused successfully",
+      tradingPaused: true,
+      totalPnlUsd: getTotalPnlUsd().toFixed(4),
+    });
   });
 
   const port = process.env.PORT || 3000;
@@ -350,6 +385,13 @@ async function main() {
     await monitorPortfolio();
 
     const currentPnl = getTotalPnlUsd();
+
+    // Pause trading if PnL drops below -$1
+    if (currentPnl <= -1.0 && !isTradingPaused()) {
+      await pauseTrading(`Total PnL dropped below -$1.00 (Current: $${currentPnl.toFixed(4)})`);
+    }
+
+    // Global stop-loss still shuts down the bot completely
     if (currentPnl <= GLOBAL_STOP_LOSS_USD) {
       await logEvent(
         "ERROR",
