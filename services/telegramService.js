@@ -22,13 +22,30 @@ async function sendMessage(text) {
   }
 }
 
-export async function sendBuyNotification(metadata, solAmount, signature) {
-  const message = `
+export async function sendBuyNotification(metadata, solAmount, signature, totalPnl = null, creatorStats = null) {
+  let message = `
 🚀 **New Buy!** 🚀
 *Token:* ${metadata.name} (${metadata.symbol})
 *Amount:* ${solAmount} SOL
-*Signature:* [${signature.slice(0, 8)}...](https://solscan.io/tx/${signature})
-    `;
+*Signature:* [${signature.slice(0, 8)}...](https://solscan.io/tx/${signature})`;
+
+  // Add creator stats if available
+  if (creatorStats && creatorStats.totalTokens > 0) {
+    message += `\n\n📊 *Creator Report:*\n`;
+    message += `• Total Coins: ${creatorStats.totalTokens}\n`;
+    message += `• Survived >10 min: ${creatorStats.survivedTokens}\n`;
+    message += `• Quick Rugs: ${creatorStats.quickRugs}\n`;
+    if (creatorStats.avgSurvivalMins > 0) {
+      message += `• Avg Survival: ${creatorStats.avgSurvivalMins} mins`;
+    }
+  }
+
+  // Add total PnL if available
+  if (totalPnl !== null) {
+    const pnlSign = totalPnl >= 0 ? '+' : '';
+    message += `\n\n💰 *Total Bot Earnings:* ${pnlSign}$${totalPnl.toFixed(4)}`;
+  }
+
   await sendMessage(message);
 }
 

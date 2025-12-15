@@ -107,14 +107,15 @@ async function processNewPool(
       return;
     }
 
-    // Pass creator address for real-time monitoring after purchase
+    // Pass creator address and stats for real-time monitoring and telegram notifications
     await buyToken(
       mintAddress,
       rugCheckReport.risk.level,
       metadata,
       poolAddress,
       source,
-      rugCheckReport.creatorAddress
+      rugCheckReport.creatorAddress,
+      rugCheckReport.creatorStats
     );
   } catch (error) {
     await logEvent("ERROR", `Error processing new pool from ${source}:`, {

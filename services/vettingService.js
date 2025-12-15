@@ -114,11 +114,15 @@ async function getCreatorFromHelius(mintAddress) {
  * IMPORTANT: Only counts as a "rug" if they dumped within 10 MINUTES of token creation
  * Selling after hours/days is normal profit-taking, not a quick rug
  *
+ * NEW REQUIREMENT: Creator MUST have at least 1 previous token that survived >10 minutes
+ * If creator has NO coins or ALL coins were quick-rugged, FAIL vetting
+ *
  * This function:
  * 1. Gets all tokens the creator has interacted with
  * 2. For each token, finds when it was created
  * 3. Checks if creator dumped >80% within 10 min of creation
- * 4. Flags as serial rugger if 2+ quick rugs found
+ * 4. Checks if creator has at least 1 token that survived >10 min
+ * 5. Flags as serial rugger if 2+ quick rugs found OR no coins survived
  */
 async function checkSerialRugger(creatorAddress, currentMint) {
   const CACHE_DURATION_MS = 5 * 60 * 1000; // Cache for 5 minutes
@@ -134,7 +138,12 @@ async function checkSerialRugger(creatorAddress, currentMint) {
         previousRugs: cached.ruggedTokens?.length || 0,
       });
     }
-    return cached.isRugger;
+    if (cached.noSurvivedCoins) {
+      await logEvent("WARN", `Creator has NO coins that survived >10 min (cached)`, {
+        creator: creatorAddress,
+      });
+    }
+    return cached.isRugger || cached.noSurvivedCoins;
   }
 
   try {
@@ -209,14 +218,12 @@ async function checkSerialRugger(creatorAddress, currentMint) {
 
     // Now check each token: was it a QUICK rug (dumped within 10 min of creation)?
     const quickRuggedTokens = [];
+    const survivedTokens = []; // Track tokens that survived >10 minutes
 
     for (const [mint, data] of tokenInteractions) {
       if (data.highestBalance <= 0 || data.totalSold <= 0) continue;
 
       const soldPercent = (data.totalSold / data.highestBalance) * 100;
-
-      // Only check tokens where creator sold >80%
-      if (soldPercent < MIN_DUMP_PERCENT) continue;
 
       try {
         // Get token creation time
@@ -233,12 +240,19 @@ async function checkSerialRugger(creatorAddress, currentMint) {
         // Check if first sell was within 10 minutes of creation
         const timeBetweenCreateAndSell = data.firstSellTime - tokenCreationTime;
 
-        if (timeBetweenCreateAndSell <= QUICK_RUG_WINDOW_SECONDS) {
+        // Only check tokens where creator sold >80%
+        if (soldPercent >= MIN_DUMP_PERCENT && timeBetweenCreateAndSell <= QUICK_RUG_WINDOW_SECONDS) {
           // This is a QUICK RUG - dumped within 10 min of creation!
           quickRuggedTokens.push({
             mint: mint.slice(0, 8) + "...",
             soldPercent: soldPercent.toFixed(1) + "%",
             dumpedAfterMinutes: (timeBetweenCreateAndSell / 60).toFixed(1),
+          });
+        } else if (timeBetweenCreateAndSell > QUICK_RUG_WINDOW_SECONDS) {
+          // Token survived more than 10 minutes before creator sold
+          survivedTokens.push({
+            mint: mint.slice(0, 8) + "...",
+            survivedMinutes: (timeBetweenCreateAndSell / 60).toFixed(1),
           });
         }
       } catch (mintErr) {
@@ -247,30 +261,62 @@ async function checkSerialRugger(creatorAddress, currentMint) {
     }
 
     const isSerialRugger = quickRuggedTokens.length >= 2; // 2+ quick rugs = serial rugger
+    const noSurvivedCoins = tokenInteractions.size > 0 && survivedTokens.length === 0; // Has coins but none survived
 
     // Cache the result
     knownRuggersCache.set(creatorAddress, {
       isRugger: isSerialRugger,
+      noSurvivedCoins,
       ruggedTokens: quickRuggedTokens,
+      survivedTokens,
       checkedAt: Date.now(),
     });
+
+    // FAIL if creator has NO tokens that survived >10 minutes
+    if (noSurvivedCoins) {
+      await logEvent("WARN", `VETTING FAILED: Creator has ${tokenInteractions.size} previous token(s) but NONE survived >10 min`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+        totalTokens: tokenInteractions.size,
+        quickRugs: quickRuggedTokens.length,
+      });
+      return true;
+    }
 
     // FAIL if creator has ANY previous quick-rug (even 1)
     if (quickRuggedTokens.length >= 1) {
       await logEvent("WARN", `RUGGER DETECTED! Creator quick-rugged ${quickRuggedTokens.length} token(s) within 10 min`, {
         creator: creatorAddress.slice(0, 8) + "...",
         ruggedTokens: quickRuggedTokens,
+        survivedTokens,
       });
       return true;
     }
 
-    return false;
+    // PASS: Creator has coins that survived AND no quick rugs
+    if (survivedTokens.length > 0) {
+      await logEvent("INFO", `Creator has ${survivedTokens.length} token(s) that survived >10 min`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+        survivedTokens,
+      });
+    }
+
+    return {
+      passed: true,
+      stats: {
+        totalTokens: tokenInteractions.size,
+        survivedTokens: survivedTokens.length,
+        quickRugs: quickRuggedTokens.length,
+        avgSurvivalMins: survivedTokens.length > 0
+          ? (survivedTokens.reduce((sum, t) => sum + parseFloat(t.survivedMinutes), 0) / survivedTokens.length).toFixed(1)
+          : 0,
+      }
+    };
   } catch (error) {
     await logEvent("ERROR", "Error checking serial rugger", {
       error: error.message,
       creator: creatorAddress,
     });
-    return false;
+    return { passed: true, stats: null };
   }
 }
 
@@ -1291,6 +1337,8 @@ export async function checkRug(mintAddress) {
     }
 
     let creatorAddress = report.creator?.address || report.creator;
+    let creatorStats = null; // Initialize outside the if block
+
     if (!creatorAddress) {
       await logEvent(
         "WARN",
@@ -1306,13 +1354,25 @@ export async function checkRug(mintAddress) {
       });
 
       // CHECK 1: Is this a SERIAL RUGGER? (rugged 2+ tokens before)
-      if (await checkSerialRugger(creatorAddress, mintAddress)) {
+      const ruggerCheck = await checkSerialRugger(creatorAddress, mintAddress);
+      if (typeof ruggerCheck === 'boolean' && ruggerCheck) {
+        // Old format (boolean true = fail)
+        await logEvent("WARN", `Vetting FAILED: Creator is a SERIAL RUGGER!`, {
+          mint: mintAddress,
+          creator: creatorAddress,
+        });
+        return null;
+      } else if (typeof ruggerCheck === 'object' && !ruggerCheck.passed) {
+        // New format (object with passed: false)
         await logEvent("WARN", `Vetting FAILED: Creator is a SERIAL RUGGER!`, {
           mint: mintAddress,
           creator: creatorAddress,
         });
         return null;
       }
+
+      // Store creator stats for telegram notification
+      creatorStats = (typeof ruggerCheck === 'object' && ruggerCheck.stats) ? ruggerCheck.stats : null;
 
       // CHECK 2: Did creator dump THIS token within 10 min of creation?
       if (await detectEarlyDevSell(creatorAddress, mintAddress)) {
@@ -1363,6 +1423,7 @@ export async function checkRug(mintAddress) {
       lpLockedPct: lpCheck.lpLockedPct,
       liquidity: report.totalMarketLiquidity,
       creatorAddress: creatorAddress || null, // Include creator for post-purchase monitoring
+      creatorStats: creatorStats || null, // Include creator stats for Telegram notification
     };
 
     await logEvent("SUCCESS", `Vetting passed for token.`, {
