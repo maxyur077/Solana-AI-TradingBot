@@ -47,6 +47,10 @@ export const RAYDIUM_ENABLED = parseBoolean(
   loadEnvVariable("RAYDIUM_ENABLED", "true", false),
   true
 );
+export const PUMPFUN_ENABLED = parseBoolean(
+  loadEnvVariable("PUMPFUN_ENABLED", "true", false),
+  true
+);
 
 export const MAX_PORTFOLIO_SIZE = parseInt(
   loadEnvVariable("MAX_PORTFOLIO_SIZE"),
@@ -214,17 +218,21 @@ export const MONITORED_DEXES = process.env.MONITORED_DEXES
   ? process.env.MONITORED_DEXES.split(",")
       .map((d) => d.trim().toLowerCase())
       .filter(Boolean)
-  : ["raydium", "meteora-dlmm", "meteora-damm-v2"];
+  : ["raydium", "meteora-dlmm", "meteora-damm-v2", "pumpfun"];
 
 export function getActiveDexConfig() {
-  if (METEORA_ENABLED && RAYDIUM_ENABLED) {
-    return { meteora: true, raydium: true, mode: "both" };
-  }
-  if (METEORA_ENABLED && !RAYDIUM_ENABLED) {
-    return { meteora: true, raydium: false, mode: "meteora-only" };
-  }
-  if (!METEORA_ENABLED && RAYDIUM_ENABLED) {
-    return { meteora: false, raydium: true, mode: "raydium-only" };
-  }
-  return { meteora: true, raydium: false, mode: "meteora-only" };
+  const config = {
+    meteora: METEORA_ENABLED,
+    raydium: RAYDIUM_ENABLED,
+    pumpfun: PUMPFUN_ENABLED,
+    mode: []
+  };
+
+  if (METEORA_ENABLED) config.mode.push("meteora");
+  if (RAYDIUM_ENABLED) config.mode.push("raydium");
+  if (PUMPFUN_ENABLED) config.mode.push("pumpfun");
+
+  config.mode = config.mode.length > 0 ? config.mode.join("+") : "none";
+
+  return config;
 }

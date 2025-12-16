@@ -1,9 +1,17 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { logEvent } from "./databaseService.js";
-import { RPC_URL, ADDITIONAL_RPC_URLS, METEORA_ENABLED, RAYDIUM_ENABLED, getActiveDexConfig } from "../config.js";
+import { RPC_URL, ADDITIONAL_RPC_URLS, METEORA_ENABLED, RAYDIUM_ENABLED, PUMPFUN_ENABLED, getActiveDexConfig } from "../config.js";
 import { METEORA_PROGRAMS, POOL_INIT_INDICATORS, RAYDIUM_AMM_PROGRAM, SOL_MINT, RAYDIUM_AUTHORITY, COMMON_TOKENS, SYSTEM_PROGRAMS } from "../utils/constants.js";
 import { createWsEndpoint, getRpcName } from "../utils/helpers.js";
 import { hasProcessedSignature, markSignatureProcessed } from "./webhookService.js";
+import {
+  subscribeToPumpfun as pumpfunSubscribe,
+  unsubscribeFromPumpfun as pumpfunUnsubscribe,
+  setPumpfunCallback,
+  initPumpfunConnection,
+  getPumpfunSubscriptionStatus,
+  isPumpfunActive as checkPumpfunActive
+} from "./pumpfunService.js";
 
 const activeRaydiumSubscriptions = new Map();
 const activeMeteoraSubscriptions = new Map();
@@ -11,10 +19,12 @@ const activeConnections = new Map();
 
 let meteoraCallback = null;
 let raydiumCallback = null;
+let pumpfunCallback = null;
 let primaryConnection = null;
 
 let isMeteoraSubscribed = false;
 let isRaydiumSubscribed = false;
+let isPumpfunSubscribed = false;
 
 export function initDexManager() {
   primaryConnection = new Connection(RPC_URL, {
@@ -38,6 +48,11 @@ export function setMeteoraCallback(callback) {
 
 export function setRaydiumCallback(callback) {
   raydiumCallback = callback;
+}
+
+export function setPumpfunDexCallback(callback) {
+  pumpfunCallback = callback;
+  setPumpfunCallback(callback);
 }
 
 function extractMintFromRaydiumTransaction(transaction) {
@@ -322,6 +337,42 @@ export async function unsubscribeFromRaydium() {
   await logEvent("SUCCESS", "Unsubscribed from all Raydium pools");
 }
 
+export async function subscribeToPumpfunDex() {
+  if (!PUMPFUN_ENABLED) {
+    await logEvent("INFO", "Pump.fun is disabled via config");
+    return;
+  }
+
+  if (isPumpfunSubscribed) {
+    await logEvent("INFO", "Pump.fun already subscribed");
+    return;
+  }
+
+  try {
+    const connection = getPrimaryConnection();
+    const wsUrl = createWsEndpoint(RPC_URL);
+    await pumpfunSubscribe(connection, wsUrl);
+    isPumpfunSubscribed = true;
+    await logEvent("SUCCESS", "Subscribed to Pump.fun");
+  } catch (error) {
+    await logEvent("ERROR", "Failed to subscribe to Pump.fun", {
+      error: error.message,
+    });
+  }
+}
+
+export async function unsubscribeFromPumpfunDex() {
+  if (!isPumpfunSubscribed) return;
+
+  try {
+    await pumpfunUnsubscribe();
+    isPumpfunSubscribed = false;
+    await logEvent("SUCCESS", "Unsubscribed from Pump.fun");
+  } catch (error) {
+    await logEvent("WARN", "Error unsubscribing from Pump.fun", { error: error.message });
+  }
+}
+
 export async function subscribeToAllDexes(meteoraTypes = ["DLMM", "DAMM_V2"]) {
   const dexConfig = getActiveDexConfig();
 
@@ -334,14 +385,21 @@ export async function subscribeToAllDexes(meteoraTypes = ["DLMM", "DAMM_V2"]) {
   if (dexConfig.meteora) {
     await subscribeToMeteora(meteoraTypes);
   }
+
+  if (dexConfig.pumpfun) {
+    await subscribeToPumpfunDex();
+  }
 }
 
 export async function unsubscribeFromAllDexes() {
   await unsubscribeFromMeteora();
   await unsubscribeFromRaydium();
+  await unsubscribeFromPumpfunDex();
 }
 
 export function getSubscriptionStatus() {
+  const pumpfunStatus = getPumpfunSubscriptionStatus();
+
   return {
     meteora: {
       enabled: METEORA_ENABLED,
@@ -353,6 +411,11 @@ export function getSubscriptionStatus() {
       subscribed: isRaydiumSubscribed,
       subscriptions: activeRaydiumSubscriptions.size,
     },
+    pumpfun: {
+      enabled: PUMPFUN_ENABLED,
+      subscribed: isPumpfunSubscribed,
+      ...pumpfunStatus,
+    },
   };
 }
 
@@ -362,6 +425,10 @@ export function isMeteoraActive() {
 
 export function isRaydiumActive() {
   return isRaydiumSubscribed;
+}
+
+export function isPumpfunActive() {
+  return isPumpfunSubscribed && checkPumpfunActive();
 }
 
 export async function getRpcHealthStatus() {
