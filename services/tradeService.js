@@ -549,8 +549,9 @@ async function executeJupiterSell(mintAddress, amountToSell) {
       );
 
       if (txResult) {
+        // Use Number() instead of parseInt() to handle large token amounts correctly
         const receivedSol =
-          parseInt(quoteResponse.outAmount, 10) / LAMPORTS_PER_SOL;
+          Number(quoteResponse.outAmount) / LAMPORTS_PER_SOL;
         return { success: true, receivedSol, ...txResult };
       }
     } catch (error) {

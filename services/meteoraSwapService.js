@@ -330,12 +330,24 @@ export async function sellOnMeteora(tokenMint, tokenAmount) {
     const fee = txDetails?.meta?.fee ? txDetails.meta.fee / LAMPORTS_PER_SOL : 0;
 
     // Calculate actual SOL received from transaction balance changes
+    // For a sell: we lose tokens, gain SOL (minus fee)
+    // postBalance = preBalance + solReceived - txFee
+    // solReceived = postBalance - preBalance + txFee
     let solReceived = 0;
-    if (txDetails?.meta) {
+    if (txDetails?.meta && txDetails.meta.preBalances && txDetails.meta.postBalances) {
       const preBalance = txDetails.meta.preBalances[0] || 0;
       const postBalance = txDetails.meta.postBalances[0] || 0;
       const txFee = txDetails.meta.fee || 0;
+      // Calculate net SOL received (including fee paid)
       solReceived = (postBalance - preBalance + txFee) / LAMPORTS_PER_SOL;
+
+      // Log for debugging
+      await logEvent("INFO", "Meteora sell balance calculation", {
+        preBalance: (preBalance / LAMPORTS_PER_SOL).toFixed(6),
+        postBalance: (postBalance / LAMPORTS_PER_SOL).toFixed(6),
+        fee: fee.toFixed(6),
+        solReceived: solReceived.toFixed(6)
+      });
     }
 
     await logEvent("SUCCESS", "Meteora sell executed successfully", { signature, fee: `${fee} SOL`, solReceived: `${solReceived} SOL` });
