@@ -128,7 +128,7 @@ export async function getMeteoraTokenPrice(tokenMint) {
     });
 
     if (quote && quote.swapOutAmount) {
-      return parseInt(quote.swapOutAmount.toString()) / LAMPORTS_PER_SOL;
+      return Number(quote.swapOutAmount.toString()) / LAMPORTS_PER_SOL;
     }
 
     return 0;

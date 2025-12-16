@@ -130,7 +130,7 @@ export async function getWalletBalance() {
 export async function getTokenBalance(tokenAta) {
   try {
     const balanceResponse = await connection.getTokenAccountBalance(tokenAta);
-    return parseInt(balanceResponse.value.amount, 10);
+    return Number(balanceResponse.value.amount);
   } catch (error) {
     return 0;
   }

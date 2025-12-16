@@ -402,8 +402,8 @@ export async function buyToken(
     purchasePrice = await getTokenPriceInSol(mintAddress);
   }
 
-  if (purchasePrice <= 0 && parseInt(tokenBalance) > 0) {
-    purchasePrice = tradeAmountSol / (parseInt(tokenBalance) / 1e9);
+  if (purchasePrice <= 0 && Number(tokenBalance) > 0) {
+    purchasePrice = tradeAmountSol / (Number(tokenBalance) / 1e9);
   }
 
   const finalPrice = purchasePrice > 0 ? purchasePrice : tradeAmountSol;
@@ -591,7 +591,7 @@ export async function sellToken(mintAddress, sellPercentage) {
   let onChainBalance;
   try {
     const balanceResponse = await connection.getTokenAccountBalance(tokenAta);
-    onChainBalance = parseInt(balanceResponse.value.amount, 10);
+    onChainBalance = Number(balanceResponse.value.amount);
   } catch {
     onChainBalance = 0;
   }
