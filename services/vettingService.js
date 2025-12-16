@@ -19,6 +19,7 @@ import {
   MAX_BUNDLED_TX_INSTRUCTIONS,
   CHECK_CREATOR_HISTORY,
   MAX_CREATOR_RUGGED_TOKENS,
+  RPC_CALL_DELAY_MS,
 } from "../config.js";
 import { connection } from "./solanaService.js";
 import { PublicKey } from "@solana/web3.js";
@@ -27,6 +28,9 @@ import { RISK_LEVELS } from "../utils/constants.js";
 
 // Cache for known ruggers to avoid repeated checks
 const knownRuggersCache = new Map(); // walletAddress -> { isRugger: boolean, tokens: [], checkedAt: timestamp }
+
+// Helper function to add delay and avoid rate limiting
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function getTokenMetadata(mintAddress) {
   try {
@@ -114,15 +118,19 @@ async function getCreatorFromHelius(mintAddress) {
  * IMPORTANT: Only counts as a "rug" if they dumped within 10 MINUTES of token creation
  * Selling after hours/days is normal profit-taking, not a quick rug
  *
- * NEW REQUIREMENT: Creator MUST have at least 1 previous token that survived >10 minutes
- * If creator has NO coins or ALL coins were quick-rugged, FAIL vetting
+ * STRICT REQUIREMENTS (ALL must be met to PASS):
+ * 1. Creator MUST have transaction history (no brand new wallets)
+ * 2. Creator MUST have at least 1 previous token creation
+ * 3. Creator MUST have at least 1 token that survived >10 minutes
+ * 4. Creator CANNOT have ANY previous quick rugs (>80% dump within 10 min)
  *
  * This function:
- * 1. Gets all tokens the creator has interacted with
- * 2. For each token, finds when it was created
- * 3. Checks if creator dumped >80% within 10 min of creation
- * 4. Checks if creator has at least 1 token that survived >10 min
- * 5. Flags as serial rugger if 2+ quick rugs found OR no coins survived
+ * 1. Gets creator's last 100 transactions
+ * 2. Finds all tokens the creator sold
+ * 3. For each token, determines when it was created
+ * 4. Checks if creator dumped >80% within 10 min of creation
+ * 5. Requires at least 1 token that survived >10 min before first sell
+ * 6. Flags as rugger if ANY quick rugs found OR no coins survived
  */
 async function checkSerialRugger(creatorAddress, currentMint) {
   const CACHE_DURATION_MS = 5 * 60 * 1000; // Cache for 5 minutes
@@ -136,6 +144,7 @@ async function checkSerialRugger(creatorAddress, currentMint) {
       await logEvent("WARN", `Creator is KNOWN SERIAL RUGGER (cached)`, {
         creator: creatorAddress,
         previousRugs: cached.ruggedTokens?.length || 0,
+        reason: cached.reason || "Quick rugs detected",
       });
     }
     if (cached.noSurvivedCoins) {
@@ -143,7 +152,12 @@ async function checkSerialRugger(creatorAddress, currentMint) {
         creator: creatorAddress,
       });
     }
-    return cached.isRugger || cached.noSurvivedCoins;
+    if (cached.noTokensFound) {
+      await logEvent("WARN", `Creator has no previous token creations (cached)`, {
+        creator: creatorAddress,
+      });
+    }
+    return cached.isRugger || cached.noSurvivedCoins || cached.noTokensFound;
   }
 
   try {
@@ -155,8 +169,12 @@ async function checkSerialRugger(creatorAddress, currentMint) {
     });
 
     if (!signatures || signatures.length === 0) {
-      knownRuggersCache.set(creatorAddress, { isRugger: false, checkedAt: Date.now() });
-      return false;
+      // FAIL: Creator has no transaction history - too new/suspicious
+      await logEvent("WARN", `VETTING FAILED: Creator has no transaction history (brand new wallet)`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+      });
+      knownRuggersCache.set(creatorAddress, { isRugger: true, checkedAt: Date.now(), reason: "No history" });
+      return true; // FAIL - require creators to have history
     }
 
     // Find all unique tokens the creator has interacted with
@@ -168,6 +186,11 @@ async function checkSerialRugger(creatorAddress, currentMint) {
         const tx = await connection.getParsedTransaction(sig.signature, {
           maxSupportedTransactionVersion: 0,
         });
+
+        // Add delay to avoid rate limiting
+        if (RPC_CALL_DELAY_MS > 0) {
+          await sleep(RPC_CALL_DELAY_MS);
+        }
 
         if (!tx || !tx.meta) continue;
 
@@ -260,17 +283,28 @@ async function checkSerialRugger(creatorAddress, currentMint) {
       }
     }
 
-    const isSerialRugger = quickRuggedTokens.length >= 2; // 2+ quick rugs = serial rugger
+    const isSerialRugger = quickRuggedTokens.length >= 1; // 1+ quick rugs = serial rugger
     const noSurvivedCoins = tokenInteractions.size > 0 && survivedTokens.length === 0; // Has coins but none survived
+    const noTokensFound = tokenInteractions.size === 0; // Creator has no previous token interactions
 
     // Cache the result
     knownRuggersCache.set(creatorAddress, {
       isRugger: isSerialRugger,
       noSurvivedCoins,
+      noTokensFound,
       ruggedTokens: quickRuggedTokens,
       survivedTokens,
       checkedAt: Date.now(),
     });
+
+    // FAIL if creator has NO previous token interactions at all
+    if (noTokensFound) {
+      await logEvent("WARN", `VETTING FAILED: Creator has transactions but no previous token creations found`, {
+        creator: creatorAddress.slice(0, 8) + "...",
+        totalTransactions: signatures.length,
+      });
+      return true;
+    }
 
     // FAIL if creator has NO tokens that survived >10 minutes
     if (noSurvivedCoins) {
@@ -292,13 +326,20 @@ async function checkSerialRugger(creatorAddress, currentMint) {
       return true;
     }
 
-    // PASS: Creator has coins that survived AND no quick rugs
-    if (survivedTokens.length > 0) {
-      await logEvent("INFO", `Creator has ${survivedTokens.length} token(s) that survived >10 min`, {
+    // REQUIRE: Creator MUST have at least 1 token that survived >10 minutes
+    if (survivedTokens.length === 0) {
+      await logEvent("WARN", `VETTING FAILED: Creator has no tokens that survived >10 minutes`, {
         creator: creatorAddress.slice(0, 8) + "...",
-        survivedTokens,
+        totalTokens: tokenInteractions.size,
       });
+      return true;
     }
+
+    // PASS: Creator has coins that survived AND no quick rugs
+    await logEvent("INFO", `Creator check PASSED: ${survivedTokens.length} token(s) survived >10 min`, {
+      creator: creatorAddress.slice(0, 8) + "...",
+      survivedTokens,
+    });
 
     return {
       passed: true,
@@ -373,6 +414,11 @@ async function checkTopHoldersDumping(report, mintAddress) {
             const tx = await connection.getParsedTransaction(sig.signature, {
               maxSupportedTransactionVersion: 0,
             });
+
+            // Add delay to avoid rate limiting
+            if (RPC_CALL_DELAY_MS > 0) {
+              await sleep(RPC_CALL_DELAY_MS);
+            }
 
             if (!tx || !tx.meta) continue;
 
@@ -508,6 +554,11 @@ async function detectEarlyDevSell(creatorAddress, mintAddress) {
         const parsedTx = await connection.getParsedTransaction(tx.signature, {
           maxSupportedTransactionVersion: 0,
         });
+
+        // Add delay to avoid rate limiting
+        if (RPC_CALL_DELAY_MS > 0) {
+          await sleep(RPC_CALL_DELAY_MS);
+        }
 
         if (!parsedTx || !parsedTx.meta) continue;
 

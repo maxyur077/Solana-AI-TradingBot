@@ -45,8 +45,11 @@ export async function sendBuyNotification(metadata, solAmount, signature, totalP
   try {
     const dbProfit = await calculateTotalProfitFromDatabase();
     const solPrice = await getSolPriceUsd();
-    const totalProfitUsd = dbProfit.profitInSol * solPrice;
+
+    // If no sells yet, show $0.00 (unrealized P&L doesn't count)
+    const totalProfitUsd = dbProfit.sellCount === 0 ? 0 : dbProfit.profitInSol * solPrice;
     const pnlSign = totalProfitUsd >= 0 ? '+' : '';
+
     message += `\n\n💰 *Total Bot Earnings (DB):* ${pnlSign}$${totalProfitUsd.toFixed(4)}`;
     message += `\n📈 *Total Trades:* ${dbProfit.buyCount} buys, ${dbProfit.sellCount} sells`;
   } catch (error) {
@@ -79,8 +82,11 @@ ${pnlEmoji} **Trade Closed!** ${pnlEmoji}
   try {
     const dbProfit = await calculateTotalProfitFromDatabase();
     const solPrice = await getSolPriceUsd();
-    const totalProfitUsd = dbProfit.profitInSol * solPrice;
+
+    // If no sells yet, show $0.00 (unrealized P&L doesn't count)
+    const totalProfitUsd = dbProfit.sellCount === 0 ? 0 : dbProfit.profitInSol * solPrice;
     const pnlSign = totalProfitUsd >= 0 ? '+' : '';
+
     message += `\n\n💰 *Total Bot Earnings (DB):* ${pnlSign}$${totalProfitUsd.toFixed(4)}`;
     message += `\n📈 *Total Trades:* ${dbProfit.buyCount} buys, ${dbProfit.sellCount} sells`;
   } catch (error) {

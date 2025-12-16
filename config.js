@@ -118,6 +118,12 @@ export const MAX_CREATOR_RUGGED_TOKENS = parseInt(
   10
 );
 
+// RPC Rate limiting - delay between getParsedTransaction calls (milliseconds)
+export const RPC_CALL_DELAY_MS = parseInt(
+  loadEnvVariable("RPC_CALL_DELAY_MS", "100", false),
+  10
+);
+
 export const TRADE_AMOUNTS = {
   GOOD: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_GOOD")),
   WARNING: parseFloat(loadEnvVariable("TRADE_AMOUNT_SOL_WARNING")),
