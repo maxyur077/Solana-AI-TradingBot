@@ -112,199 +112,6 @@ async function getCreatorFromHelius(mintAddress) {
   }
 }
 
-async function checkFundingFromRugger(creatorAddress) {
-  try {
-    const creatorPubKey = new PublicKey(creatorAddress);
-
-    const signatures = await connection.getSignaturesForAddress(creatorPubKey, {
-      limit: 50,
-    });
-
-    if (!signatures || signatures.length === 0) {
-      return null;
-    }
-
-    for (const sig of signatures) {
-      try {
-        const tx = await connection.getParsedTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (!tx || !tx.meta) continue;
-
-        const preBalances = tx.meta.preBalances;
-        const postBalances = tx.meta.postBalances;
-        const accountKeys = tx.transaction.message.accountKeys;
-
-        for (let i = 0; i < accountKeys.length; i++) {
-          const accountPubkey = accountKeys[i].pubkey.toString();
-
-          if (accountPubkey === creatorAddress) {
-            const balanceIncrease = postBalances[i] - preBalances[i];
-
-            if (balanceIncrease > 0) {
-              for (let j = 0; j < accountKeys.length; j++) {
-                if (j === i) continue;
-
-                const balanceDecrease = preBalances[j] - postBalances[j];
-
-                if (balanceDecrease > 0) {
-                  const funderAddress = accountKeys[j].pubkey.toString();
-
-                  const isRugger = await checkIfAddressIsRugger(funderAddress);
-                  if (isRugger) {
-                    await logEvent(
-                      "INFO",
-                      `Found funding from known rugger`,
-                      {
-                        newWallet: creatorAddress.slice(0, 8) + "...",
-                        ruggerFunder: funderAddress.slice(0, 8) + "...",
-                      }
-                    );
-                    return funderAddress;
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        await sleep(100);
-      } catch (error) {
-        continue;
-      }
-    }
-
-    return null;
-  } catch (error) {
-    await logEvent("ERROR", "Error checking funding from rugger", {
-      error: error.message,
-      creator: creatorAddress,
-    });
-    return null;
-  }
-}
-
-async function checkIfAddressIsRugger(address) {
-  const QUICK_RUG_WINDOW_SECONDS = 600;
-  const MIN_DUMP_PERCENT = 80;
-
-  try {
-    const addressPubKey = new PublicKey(address);
-
-    const signatures = await connection.getSignaturesForAddress(addressPubKey, {
-      limit: 100,
-    });
-
-    if (!signatures || signatures.length === 0) {
-      return false;
-    }
-
-    const tokenInteractions = new Map();
-
-    for (const sig of signatures) {
-      try {
-        const tx = await connection.getParsedTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (!tx || !tx.meta || !tx.blockTime) continue;
-
-        const postTokenBalances = tx.meta.postTokenBalances || [];
-        const preTokenBalances = tx.meta.preTokenBalances || [];
-
-        for (const postBalance of postTokenBalances) {
-          if (postBalance.owner !== address) continue;
-
-          const mint = postBalance.mint;
-          const postAmount = Number(postBalance.uiTokenAmount.uiAmount || 0);
-
-          const preBalance = preTokenBalances.find(
-            (b) => b.mint === mint && b.owner === address
-          );
-          const preAmount = preBalance
-            ? Number(preBalance.uiTokenAmount.uiAmount || 0)
-            : 0;
-
-          if (!tokenInteractions.has(mint)) {
-            tokenInteractions.set(mint, {
-              highestBalance: 0,
-              totalSold: 0,
-              firstSellTime: null,
-              tokenCreationTime: null,
-            });
-          }
-
-          const interaction = tokenInteractions.get(mint);
-
-          if (postAmount > interaction.highestBalance) {
-            interaction.highestBalance = postAmount;
-          }
-
-          const amountChange = preAmount - postAmount;
-          if (amountChange > 0) {
-            interaction.totalSold += amountChange;
-            if (!interaction.firstSellTime) {
-              interaction.firstSellTime = tx.blockTime;
-            }
-          }
-        }
-
-        await sleep(100);
-      } catch (error) {
-        continue;
-      }
-    }
-
-    for (const [mint, interaction] of tokenInteractions.entries()) {
-      if (interaction.highestBalance === 0 || !interaction.firstSellTime) {
-        continue;
-      }
-
-      try {
-        const mintInfo = await connection.getAccountInfo(new PublicKey(mint));
-        if (!mintInfo) continue;
-
-        const creationSignatures = await connection.getSignaturesForAddress(
-          new PublicKey(mint),
-          { limit: 1 }
-        );
-
-        if (creationSignatures && creationSignatures.length > 0) {
-          const creationTx = await connection.getParsedTransaction(
-            creationSignatures[0].signature,
-            { maxSupportedTransactionVersion: 0 }
-          );
-
-          if (creationTx && creationTx.blockTime) {
-            interaction.tokenCreationTime = creationTx.blockTime;
-
-            const timeSinceCreation =
-              interaction.firstSellTime - interaction.tokenCreationTime;
-            const dumpPercent =
-              (interaction.totalSold / interaction.highestBalance) * 100;
-
-            if (
-              timeSinceCreation <= QUICK_RUG_WINDOW_SECONDS &&
-              dumpPercent >= MIN_DUMP_PERCENT
-            ) {
-              return true;
-            }
-          }
-        }
-
-        await sleep(100);
-      } catch (error) {
-        continue;
-      }
-    }
-
-    return false;
-  } catch (error) {
-    return false;
-  }
-}
-
 /**
  * Check if creator is a SERIAL RUGGER by analyzing their past tokens
  *
@@ -370,33 +177,19 @@ async function checkSerialRugger(creatorAddress, currentMint) {
     });
 
     if (!signatures || signatures.length === 0) {
-      const fundedByRugger = await checkFundingFromRugger(creatorAddress);
-      if (fundedByRugger) {
-        await logEvent(
-          "WARN",
-          `VETTING FAILED: New wallet funded by known rugger`,
-          {
-            creator: creatorAddress.slice(0, 8) + "...",
-            ruggerFunder: fundedByRugger.slice(0, 8) + "...",
-          }
-        );
-        knownRuggersCache.set(creatorAddress, {
-          isRugger: true,
-          checkedAt: Date.now(),
-          reason: "Funded by rugger",
-          fundedBy: fundedByRugger,
-        });
-        return true;
-      }
-
+      // FAIL: Creator has no transaction history - too new/suspicious
       await logEvent(
-        "INFO",
-        `New wallet with no history but not funded by rugger - allowing`,
+        "WARN",
+        `VETTING FAILED: Creator has no transaction history (brand new wallet)`,
         {
           creator: creatorAddress.slice(0, 8) + "...",
         }
       );
-      return false;
+      knownRuggersCache.set(creatorAddress, {
+        isRugger: true,
+        checkedAt: Date.now(),
+        reason: "No history",
+      });
     }
 
     // Find all unique tokens the creator has interacted with

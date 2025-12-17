@@ -11,7 +11,6 @@ import {
   ADDITIONAL_RPC_URLS,
   METEORA_ENABLED,
   RAYDIUM_ENABLED,
-  PUMPFUN_ENABLED,
   getActiveDexConfig,
 } from "./config.js";
 import {
@@ -46,19 +45,12 @@ import {
   subscribeToMeteora,
   unsubscribeFromMeteora,
   subscribeToRaydium,
-  unsubscribeFromRaydium,
-  subscribeToPumpfunDex,
-  unsubscribeFromPumpfunDex,
-  subscribeToAllDexes,
-  unsubscribeFromAllDexes,
   setMeteoraCallback,
   setRaydiumCallback,
-  setPumpfunDexCallback,
   getSubscriptionStatus,
   getRpcHealthStatus,
 } from "./services/dexManager.js";
 import { shouldFilterMeteoraToken } from "./utils/helpers.js";
-import { coinQueue } from "./services/coinProcessingQueue.js";
 import chalk from "chalk";
 import express from "express";
 
@@ -138,29 +130,24 @@ async function processNewPool(
 }
 
 async function handlePortfolioFull() {
-  await logEvent(
-    "INFO",
-    "Portfolio has 2+ coins. Unsubscribing from all DEXs to focus on monitoring existing positions."
-  );
-  await unsubscribeFromAllDexes();
+  const dexConfig = getActiveDexConfig();
+
+  if (dexConfig.meteora && METEORA_ENABLED) {
+    await logEvent(
+      "INFO",
+      "Portfolio has 2+ coins. Unsubscribing from Meteora to focus on monitoring."
+    );
+    await unsubscribeFromMeteora();
+  }
 }
 
 async function handlePortfolioAvailable() {
   const dexConfig = getActiveDexConfig();
 
-  await logEvent("INFO", "Portfolio has space. Re-subscribing to all enabled DEXs.");
-
   if (dexConfig.meteora && METEORA_ENABLED) {
+    await logEvent("INFO", "Portfolio has space. Re-subscribing to Meteora.");
     const meteoraTypes = getMeteoraTypesFromConfig();
     await subscribeToMeteora(meteoraTypes);
-  }
-
-  if (dexConfig.raydium && RAYDIUM_ENABLED) {
-    await subscribeToRaydium();
-  }
-
-  if (dexConfig.pumpfun && PUMPFUN_ENABLED) {
-    await subscribeToPumpfunDex();
   }
 }
 
@@ -184,64 +171,37 @@ async function startPoolMonitoring() {
   await logEvent("INFO", `DEX Config: ${dexConfig.mode}`);
   await logEvent(
     "INFO",
-    `METEORA_ENABLED: ${METEORA_ENABLED}, RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}, PUMPFUN_ENABLED: ${PUMPFUN_ENABLED}`
+    `METEORA_ENABLED: ${METEORA_ENABLED}, RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}`
   );
 
   initDexManager();
 
   setMeteoraCallback(
     async (signature, mintAddress, tx, programType, poolAddress) => {
-      await coinQueue.add(
+      await processNewPool(
         signature,
         mintAddress,
         tx,
         `meteora-${programType.toLowerCase()}`,
-        poolAddress,
-        processNewPool
+        poolAddress
       );
     }
   );
 
   setRaydiumCallback(async (signature, mintAddress, tx) => {
-    await coinQueue.add(
-      signature,
-      mintAddress,
-      tx,
-      "raydium",
-      null,
-      processNewPool
-    );
-  });
-
-  setPumpfunDexCallback(async (signature, mintAddress, tx) => {
-    await coinQueue.add(
-      signature,
-      mintAddress,
-      tx,
-      "pumpfun",
-      null,
-      processNewPool
-    );
+    await processNewPool(signature, mintAddress, tx, "raydium");
   });
 
   const monitorRaydium =
     dexConfig.raydium && MONITORED_DEXES.includes("raydium");
   const monitorMeteora = dexConfig.meteora;
-  const monitorPumpfun = dexConfig.pumpfun && MONITORED_DEXES.includes("pumpfun");
 
   switch (mode) {
     case "hybrid":
       if (WEBHOOK_ENABLED) {
         setupWebhookReceiver(app, WEBHOOK_PATH);
         setNewPoolCallback(async (signature, mintAddress, tx) => {
-          await coinQueue.add(
-            signature,
-            mintAddress,
-            tx,
-            "webhook",
-            null,
-            processNewPool
-          );
+          await processNewPool(signature, mintAddress, tx, "webhook");
         });
         await logEvent("INFO", "Webhook receiver enabled (hybrid mode)");
       }
@@ -253,10 +213,6 @@ async function startPoolMonitoring() {
       if (monitorMeteora) {
         const meteoraTypes = getMeteoraTypesFromConfig();
         await subscribeToMeteora(meteoraTypes);
-      }
-
-      if (monitorPumpfun) {
-        await subscribeToPumpfunDex();
       }
       break;
 
@@ -270,14 +226,7 @@ async function startPoolMonitoring() {
       }
       setupWebhookReceiver(app, WEBHOOK_PATH);
       setNewPoolCallback(async (signature, mintAddress, tx) => {
-        await coinQueue.add(
-          signature,
-          mintAddress,
-          tx,
-          "webhook",
-          null,
-          processNewPool
-        );
+        await processNewPool(signature, mintAddress, tx, "webhook");
       });
       await logEvent("INFO", "Webhook-only mode enabled");
       break;
@@ -292,10 +241,6 @@ async function startPoolMonitoring() {
         const meteoraTypes = getMeteoraTypesFromConfig();
         await subscribeToMeteora(meteoraTypes);
       }
-
-      if (monitorPumpfun) {
-        await subscribeToPumpfunDex();
-      }
       break;
   }
 }
@@ -304,7 +249,6 @@ function startServer() {
   app.get("/health", async (req, res) => {
     const rpcHealth = await getRpcHealthStatus();
     const subscriptionStatus = getSubscriptionStatus();
-    const queueStatus = coinQueue.getQueueStatus();
     res.status(200).json({
       status: "OK",
       portfolioSize: getPortfolioSize(),
@@ -314,7 +258,6 @@ function startServer() {
       dexConfig: getActiveDexConfig(),
       subscriptions: subscriptionStatus,
       rpcConnections: rpcHealth,
-      processingQueue: queueStatus,
     });
   });
 
