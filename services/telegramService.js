@@ -5,6 +5,21 @@ import { getSolPriceUsd } from "./solanaService.js";
 
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
+function formatDexName(dexSource) {
+  if (!dexSource) return 'Unknown';
+
+  const dexMap = {
+    'raydium': 'Raydium',
+    'meteora': 'Meteora',
+    'meteora-damm_v2': 'Meteora DAMM v2',
+    'meteora-dlmm': 'Meteora DLMM',
+    'jupiter': 'Jupiter',
+    'pumpfun': 'Pump.fun'
+  };
+
+  return dexMap[dexSource] || dexSource.toUpperCase();
+}
+
 async function sendMessage(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     logEvent("WARN", "Telegram credentials not set. Skipping notification.");
@@ -23,11 +38,12 @@ async function sendMessage(text) {
   }
 }
 
-export async function sendBuyNotification(metadata, solAmount, signature, totalPnl = null, creatorStats = null) {
+export async function sendBuyNotification(metadata, solAmount, signature, totalPnl = null, creatorStats = null, dexSource = null) {
   let message = `
 🚀 **New Buy!** 🚀
 *Token:* ${metadata.name} (${metadata.symbol})
 *Amount:* ${solAmount} SOL
+*DEX:* ${formatDexName(dexSource)}
 *Signature:* [${signature.slice(0, 8)}...](https://solscan.io/tx/${signature})`;
 
   // Add creator stats if available

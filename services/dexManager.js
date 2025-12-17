@@ -1,9 +1,36 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { logEvent } from "./databaseService.js";
-import { RPC_URL, ADDITIONAL_RPC_URLS, METEORA_ENABLED, RAYDIUM_ENABLED, getActiveDexConfig } from "../config.js";
-import { METEORA_PROGRAMS, POOL_INIT_INDICATORS, RAYDIUM_AMM_PROGRAM, SOL_MINT, RAYDIUM_AUTHORITY, COMMON_TOKENS, SYSTEM_PROGRAMS } from "../utils/constants.js";
+import {
+  RPC_URL,
+  ADDITIONAL_RPC_URLS,
+  METEORA_ENABLED,
+  RAYDIUM_ENABLED,
+  getActiveDexConfig,
+} from "../config.js";
+import {
+  METEORA_PROGRAMS,
+  POOL_INIT_INDICATORS,
+  RAYDIUM_AMM_PROGRAM,
+  SOL_MINT,
+  RAYDIUM_AUTHORITY,
+  COMMON_TOKENS,
+  SYSTEM_PROGRAMS,
+} from "../utils/constants.js";
 import { createWsEndpoint, getRpcName } from "../utils/helpers.js";
-import { hasProcessedSignature, markSignatureProcessed } from "./webhookService.js";
+import {
+  hasProcessedSignature,
+  markSignatureProcessed,
+} from "./webhookService.js";
+import {
+  subscribeToPumpfun as pumpfunSubscribe,
+  unsubscribeFromPumpfun as pumpfunUnsubscribe,
+  setPumpfunCallback,
+  initPumpfunConnection,
+  getPumpfunSubscriptionStatus,
+  isPumpfunActive as checkPumpfunActive,
+  pausePumpfunInternal,
+  resumePumpfunInternal,
+} from "./pumpfunService.js";
 
 const activeRaydiumSubscriptions = new Map();
 const activeMeteoraSubscriptions = new Map();
@@ -15,6 +42,10 @@ let primaryConnection = null;
 
 let isMeteoraSubscribed = false;
 let isRaydiumSubscribed = false;
+
+let isMeteoraPaused = false;
+let isRaydiumPaused = false;
+let isPumpfunPaused = false;
 
 export function initDexManager() {
   primaryConnection = new Connection(RPC_URL, {
@@ -42,7 +73,11 @@ export function setRaydiumCallback(callback) {
 
 function extractMintFromRaydiumTransaction(transaction) {
   try {
-    if (!transaction || !transaction.meta || !transaction.meta.postTokenBalances) {
+    if (
+      !transaction ||
+      !transaction.meta ||
+      !transaction.meta.postTokenBalances
+    ) {
       return null;
     }
 
@@ -67,7 +102,11 @@ function extractInfoFromMeteoraTransaction(transaction, programType) {
 
     if (transaction.meta.postTokenBalances) {
       for (const balance of transaction.meta.postTokenBalances) {
-        if (balance.mint && balance.mint !== SOL_MINT && !COMMON_TOKENS.includes(balance.mint)) {
+        if (
+          balance.mint &&
+          balance.mint !== SOL_MINT &&
+          !COMMON_TOKENS.includes(balance.mint)
+        ) {
           mintAddress = balance.mint;
           break;
         }
@@ -78,7 +117,10 @@ function extractInfoFromMeteoraTransaction(transaction, programType) {
       for (const inner of transaction.meta.innerInstructions) {
         for (const ix of inner.instructions) {
           if (ix.parsed && ix.parsed.info && ix.parsed.info.mint) {
-            if (ix.parsed.info.mint !== SOL_MINT && !COMMON_TOKENS.includes(ix.parsed.info.mint)) {
+            if (
+              ix.parsed.info.mint !== SOL_MINT &&
+              !COMMON_TOKENS.includes(ix.parsed.info.mint)
+            ) {
               mintAddress = ix.parsed.info.mint;
               break;
             }
@@ -96,7 +138,7 @@ function extractInfoFromMeteoraTransaction(transaction, programType) {
         for (let i = 0; i < accountKeys.length; i++) {
           const key = accountKeys[i];
           const address = key.pubkey ? key.pubkey.toString() : key.toString();
-          const isWritable = key.writable !== undefined ? key.writable : (i < 3);
+          const isWritable = key.writable !== undefined ? key.writable : i < 3;
           const isSigner = key.signer !== undefined ? key.signer : false;
 
           const excludedAddresses = [
@@ -108,7 +150,12 @@ function extractInfoFromMeteoraTransaction(transaction, programType) {
 
           if (excludedAddresses.includes(address)) continue;
 
-          if (isWritable && !isSigner && address.length >= 32 && address.length <= 44) {
+          if (
+            isWritable &&
+            !isSigner &&
+            address.length >= 32 &&
+            address.length <= 44
+          ) {
             poolAddress = address;
             break;
           }
@@ -133,7 +180,9 @@ function isPoolCreationTransaction(logs, programType) {
 
   return logs.some((log) => {
     const logLower = log.toLowerCase();
-    return indicators.some((indicator) => logLower.includes(indicator.toLowerCase()));
+    return indicators.some((indicator) =>
+      logLower.includes(indicator.toLowerCase())
+    );
   });
 }
 
@@ -166,13 +215,17 @@ export async function subscribeToMeteora(programTypes = ["DLMM", "DAMM_V2"]) {
         async ({ logs, signature, err }) => {
           if (err) return;
 
+          if (isMeteoraPaused) return;
+
           if (!isPoolCreationTransaction(logs, programType)) return;
 
           if (hasProcessedSignature(signature)) return;
 
           markSignatureProcessed(signature);
 
-          await logEvent("INFO", `[METEORA-${programType}] New pool detected`, { signature });
+          await logEvent("INFO", `[METEORA-${programType}] New pool detected`, {
+            signature,
+          });
 
           try {
             const tx = await connection.getParsedTransaction(signature, {
@@ -183,23 +236,40 @@ export async function subscribeToMeteora(programTypes = ["DLMM", "DAMM_V2"]) {
             const info = extractInfoFromMeteoraTransaction(tx, programType);
 
             if (info && info.mintAddress && meteoraCallback) {
-              await logEvent("INFO", `[METEORA-${programType}] Token mint: ${info.mintAddress}`, {
-                poolAddress: info.poolAddress || "unknown"
-              });
-              await meteoraCallback(signature, info.mintAddress, tx, programType, info.poolAddress);
+              await logEvent(
+                "INFO",
+                `[METEORA-${programType}] Token mint: ${info.mintAddress}`,
+                {
+                  poolAddress: info.poolAddress || "unknown",
+                }
+              );
+              await meteoraCallback(
+                signature,
+                info.mintAddress,
+                tx,
+                programType,
+                info.poolAddress
+              );
             }
           } catch (txError) {
-            await logEvent("WARN", `[METEORA-${programType}] Failed to fetch transaction`, {
-              signature,
-              error: txError.message,
-            });
+            await logEvent(
+              "WARN",
+              `[METEORA-${programType}] Failed to fetch transaction`,
+              {
+                signature,
+                error: txError.message,
+              }
+            );
           }
         },
         "processed"
       );
 
       activeMeteoraSubscriptions.set(programType, subscriptionId);
-      await logEvent("SUCCESS", `Subscribed to Meteora ${programType}: ${programId}`);
+      await logEvent(
+        "SUCCESS",
+        `Subscribed to Meteora ${programType}: ${programId}`
+      );
     } catch (error) {
       await logEvent("ERROR", `Failed to subscribe to Meteora ${programType}`, {
         error: error.message,
@@ -220,7 +290,11 @@ export async function unsubscribeFromMeteora() {
       await connection.removeOnLogsListener(subscriptionId);
       await logEvent("INFO", `Unsubscribed from Meteora ${programType}`);
     } catch (error) {
-      await logEvent("WARN", `Error unsubscribing from Meteora ${programType}`, { error: error.message });
+      await logEvent(
+        "WARN",
+        `Error unsubscribing from Meteora ${programType}`,
+        { error: error.message }
+      );
     }
   }
 
@@ -242,7 +316,10 @@ export async function subscribeToRaydium() {
 
   const rpcUrls = [RPC_URL, ...ADDITIONAL_RPC_URLS].filter(Boolean);
 
-  await logEvent("INFO", `Subscribing to Raydium on ${rpcUrls.length} RPC endpoints`);
+  await logEvent(
+    "INFO",
+    `Subscribing to Raydium on ${rpcUrls.length} RPC endpoints`
+  );
 
   for (const url of rpcUrls) {
     try {
@@ -260,6 +337,8 @@ export async function subscribeToRaydium() {
         async ({ logs, signature, err }) => {
           if (err) return;
 
+          if (isRaydiumPaused) return;
+
           if (!logs.some((log) => log.includes("initialize2"))) return;
 
           if (hasProcessedSignature(signature)) return;
@@ -267,7 +346,9 @@ export async function subscribeToRaydium() {
           markSignatureProcessed(signature);
 
           const rpcName = getRpcName(url);
-          await logEvent("INFO", `[${rpcName}] New Raydium pool detected`, { signature });
+          await logEvent("INFO", `[${rpcName}] New Raydium pool detected`, {
+            signature,
+          });
 
           try {
             const tx = await connection.getParsedTransaction(signature, {
@@ -313,7 +394,9 @@ export async function unsubscribeFromRaydium() {
       }
       await logEvent("INFO", `Unsubscribed from Raydium on ${getRpcName(url)}`);
     } catch (error) {
-      await logEvent("WARN", `Error unsubscribing from Raydium`, { error: error.message });
+      await logEvent("WARN", `Error unsubscribing from Raydium`, {
+        error: error.message,
+      });
     }
   }
 
@@ -362,6 +445,48 @@ export function isMeteoraActive() {
 
 export function isRaydiumActive() {
   return isRaydiumSubscribed;
+}
+
+export function isPumpfunActive() {
+  return isPumpfunSubscribed && checkPumpfunActive();
+}
+
+export async function pauseMeteora() {
+  if (!isMeteoraSubscribed || isMeteoraPaused) return;
+  isMeteoraPaused = true;
+  await logEvent("INFO", "Meteora paused - processing current coin");
+}
+
+export async function resumeMeteora() {
+  if (!isMeteoraSubscribed || !isMeteoraPaused) return;
+  isMeteoraPaused = false;
+  await logEvent("INFO", "Meteora resumed - listening for new coins");
+}
+
+export async function pauseRaydium() {
+  if (!isRaydiumSubscribed || isRaydiumPaused) return;
+  isRaydiumPaused = true;
+  await logEvent("INFO", "Raydium paused - processing current coin");
+}
+
+export async function resumeRaydium() {
+  if (!isRaydiumSubscribed || !isRaydiumPaused) return;
+  isRaydiumPaused = false;
+  await logEvent("INFO", "Raydium resumed - listening for new coins");
+}
+
+export async function pausePumpfun() {
+  if (!isPumpfunSubscribed || isPumpfunPaused) return;
+  isPumpfunPaused = true;
+  pausePumpfunInternal();
+  await logEvent("INFO", "Pumpfun paused - processing current coin");
+}
+
+export async function resumePumpfun() {
+  if (!isPumpfunSubscribed || !isPumpfunPaused) return;
+  isPumpfunPaused = false;
+  resumePumpfunInternal();
+  await logEvent("INFO", "Pumpfun resumed - listening for new coins");
 }
 
 export async function getRpcHealthStatus() {
