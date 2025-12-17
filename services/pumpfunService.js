@@ -15,6 +15,7 @@ let isPumpfunSubscribed = false;
 let pumpfunSubscriptionId = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
+let isPumpfunPaused = false;
 
 export function initPumpfunConnection(rpcUrl) {
   if (!pumpfunConnection) {
@@ -81,6 +82,8 @@ export async function subscribeToPumpfun(connection, rpcWsUrl) {
       }
 
       if (data.method === "logsNotification" && data.params) {
+        if (isPumpfunPaused) return;
+
         const { value } = data.params.result;
         const signature = value.signature;
         const logs = value.logs || [];
@@ -275,4 +278,12 @@ async function checkIfNewlyCreated(connection, transaction, mintAddress) {
 
 export function isPumpfunActive() {
   return isPumpfunSubscribed;
+}
+
+export function pausePumpfunInternal() {
+  isPumpfunPaused = true;
+}
+
+export function resumePumpfunInternal() {
+  isPumpfunPaused = false;
 }

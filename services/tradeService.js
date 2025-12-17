@@ -432,7 +432,7 @@ export async function buyToken(
     totalPnlUsd,
     finalDexSource
   );
-  await sendBuyNotification(metadata, tradeAmountSol, buyResult.signature, totalPnlUsd, creatorStats);
+  await sendBuyNotification(metadata, tradeAmountSol, buyResult.signature, totalPnlUsd, creatorStats, finalDexSource);
 
   const monitor = startTrailingStopMonitor(
     mintAddress,

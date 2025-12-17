@@ -1,8 +1,7 @@
 import { logEvent } from "./databaseService.js";
 import { getPortfolioSize } from "./tradeService.js";
 import { MAX_PORTFOLIO_SIZE } from "../config.js";
-
-const DEX_ROTATION_ORDER = ["pumpfun", "meteora", "raydium"];
+import { pauseMeteora, resumeMeteora, pauseRaydium, resumeRaydium, pausePumpfun, resumePumpfun } from "./dexManager.js";
 
 class CoinProcessingQueue {
   constructor() {
@@ -11,8 +10,11 @@ class CoinProcessingQueue {
       meteora: null,
       raydium: null,
     };
-    this.isProcessing = false;
-    this.currentRotationIndex = 0;
+    this.processing = {
+      pumpfun: false,
+      meteora: false,
+      raydium: false,
+    };
   }
 
   async add(signature, mintAddress, transaction, source, poolAddress, processor) {
@@ -24,10 +26,6 @@ class CoinProcessingQueue {
 
     const dexType = this.getDexType(source);
 
-    if (this.queues[dexType] !== null) {
-      return;
-    }
-
     const queueItem = {
       signature,
       mintAddress,
@@ -38,126 +36,99 @@ class CoinProcessingQueue {
       addedAt: Date.now(),
     };
 
+    if (this.queues[dexType] !== null) {
+      await logEvent("INFO", `Replacing ${dexType.toUpperCase()} queued coin with fresh coin`, {
+        oldMint: this.queues[dexType].mintAddress,
+        newMint: mintAddress,
+        dexType,
+      });
+    }
+
     this.queues[dexType] = queueItem;
 
-    await logEvent("INFO", `Added coin to ${dexType.toUpperCase()} queue (rotation: pumpfun → meteora → raydium)`, {
+    await logEvent("INFO", `Added fresh coin to ${dexType.toUpperCase()} queue (parallel processing)`, {
       source,
       mintAddress,
       dexType,
       portfolioSize: currentPortfolioSize,
     });
 
-    if (!this.isProcessing) {
-      this.processQueue();
-    }
+    this.processDex(dexType);
   }
 
-  async processQueue() {
-    if (this.isProcessing) {
+  async processDex(dexType) {
+    if (this.processing[dexType]) {
       return;
     }
 
-    if (!this.hasAnyCoins()) {
-      return;
-    }
+    this.processing[dexType] = true;
 
-    this.isProcessing = true;
+    const pauseFunctions = {
+      pumpfun: pausePumpfun,
+      meteora: null,
+      raydium: pauseRaydium,
+    };
 
-    while (this.hasAnyCoins()) {
-      const currentPortfolioSize = getPortfolioSize();
+    const resumeFunctions = {
+      pumpfun: resumePumpfun,
+      meteora: null,
+      raydium: resumeRaydium,
+    };
 
-      if (currentPortfolioSize >= MAX_PORTFOLIO_SIZE) {
-        await logEvent("INFO", `Portfolio full during processing. Clearing all queues`, {
-          portfolioSize: currentPortfolioSize,
-        });
-        this.clearAllQueues();
-        break;
-      }
+    try {
+      while (this.queues[dexType] !== null) {
+        const currentPortfolioSize = getPortfolioSize();
 
-      const item = this.getNextCoinByRotation();
+        if (currentPortfolioSize >= MAX_PORTFOLIO_SIZE) {
+          await logEvent("INFO", `Portfolio full, clearing ${dexType.toUpperCase()} queue`, {
+            portfolioSize: currentPortfolioSize,
+          });
+          this.queues[dexType] = null;
+          break;
+        }
 
-      if (!item) {
-        break;
-      }
-
-      await logEvent("INFO", `Processing coin from ${item.dexType.toUpperCase()} (rotation order)`, {
-        source: item.source,
-        mintAddress: item.mintAddress,
-        nextInRotation: this.getNextDexInRotation(),
-        portfolioSize: currentPortfolioSize,
-      });
-
-      try {
-        await item.processor(
-          item.signature,
-          item.mintAddress,
-          item.transaction,
-          item.source,
-          item.poolAddress
-        );
-
-        await logEvent("SUCCESS", `Completed processing ${item.dexType.toUpperCase()} coin`, {
-          source: item.source,
-          mintAddress: item.mintAddress,
-        });
-      } catch (error) {
-        await logEvent("ERROR", `Error processing ${item.dexType.toUpperCase()} coin`, {
-          source: item.source,
-          mintAddress: item.mintAddress,
-          error: error.message,
-        });
-      }
-
-      if (this.hasAnyCoins()) {
-        const nextDex = this.getNextDexInRotation();
-        await logEvent("INFO", `Next in rotation: ${nextDex.toUpperCase()}`, {
-          remainingCoins: this.getTotalQueuedCoins(),
-        });
-      }
-    }
-
-    this.isProcessing = false;
-    await logEvent("INFO", "All queues empty");
-  }
-
-  getNextCoinByRotation() {
-    const maxAttempts = DEX_ROTATION_ORDER.length;
-    let attempts = 0;
-
-    while (attempts < maxAttempts) {
-      const dexType = DEX_ROTATION_ORDER[this.currentRotationIndex];
-      this.currentRotationIndex = (this.currentRotationIndex + 1) % DEX_ROTATION_ORDER.length;
-
-      if (this.queues[dexType] !== null) {
         const item = this.queues[dexType];
         this.queues[dexType] = null;
-        return { ...item, dexType };
+
+        if (pauseFunctions[dexType]) {
+          await pauseFunctions[dexType]();
+        }
+
+        await logEvent("INFO", `Processing ${dexType.toUpperCase()} coin in parallel`, {
+          source: item.source,
+          mintAddress: item.mintAddress,
+          portfolioSize: currentPortfolioSize,
+        });
+
+        try {
+          await item.processor(
+            item.signature,
+            item.mintAddress,
+            item.transaction,
+            item.source,
+            item.poolAddress
+          );
+
+          await logEvent("SUCCESS", `Completed ${dexType.toUpperCase()} coin processing`, {
+            source: item.source,
+            mintAddress: item.mintAddress,
+          });
+        } catch (error) {
+          await logEvent("ERROR", `Error processing ${dexType.toUpperCase()} coin`, {
+            source: item.source,
+            mintAddress: item.mintAddress,
+            error: error.message,
+          });
+        }
+
+        if (resumeFunctions[dexType]) {
+          await resumeFunctions[dexType]();
+        }
       }
-
-      attempts++;
+    } finally {
+      this.processing[dexType] = false;
+      await logEvent("INFO", `${dexType.toUpperCase()} processing thread finished`);
     }
-
-    return null;
-  }
-
-  getNextDexInRotation() {
-    return DEX_ROTATION_ORDER[this.currentRotationIndex];
-  }
-
-  hasAnyCoins() {
-    return Object.values(this.queues).some(queue => queue !== null);
-  }
-
-  getTotalQueuedCoins() {
-    return Object.values(this.queues).filter(queue => queue !== null).length;
-  }
-
-  clearAllQueues() {
-    this.queues = {
-      pumpfun: null,
-      meteora: null,
-      raydium: null,
-    };
   }
 
   getDexType(source) {
@@ -168,24 +139,37 @@ class CoinProcessingQueue {
     return "meteora";
   }
 
+  clearAllQueues() {
+    this.queues = {
+      pumpfun: null,
+      meteora: null,
+      raydium: null,
+    };
+  }
+
+  getTotalQueuedCoins() {
+    return Object.values(this.queues).filter(queue => queue !== null).length;
+  }
+
   getQueueStatus() {
     return {
       totalQueued: this.getTotalQueuedCoins(),
-      isProcessing: this.isProcessing,
-      rotationOrder: DEX_ROTATION_ORDER,
-      nextDex: this.getNextDexInRotation(),
+      processing: this.processing,
       queues: {
         pumpfun: this.queues.pumpfun ? {
           mintAddress: this.queues.pumpfun.mintAddress,
           source: this.queues.pumpfun.source,
+          addedAt: this.queues.pumpfun.addedAt,
         } : null,
         meteora: this.queues.meteora ? {
           mintAddress: this.queues.meteora.mintAddress,
           source: this.queues.meteora.source,
+          addedAt: this.queues.meteora.addedAt,
         } : null,
         raydium: this.queues.raydium ? {
           mintAddress: this.queues.raydium.mintAddress,
           source: this.queues.raydium.source,
+          addedAt: this.queues.raydium.addedAt,
         } : null,
       },
     };

@@ -10,7 +10,9 @@ import {
   setPumpfunCallback,
   initPumpfunConnection,
   getPumpfunSubscriptionStatus,
-  isPumpfunActive as checkPumpfunActive
+  isPumpfunActive as checkPumpfunActive,
+  pausePumpfunInternal,
+  resumePumpfunInternal
 } from "./pumpfunService.js";
 
 const activeRaydiumSubscriptions = new Map();
@@ -25,6 +27,10 @@ let primaryConnection = null;
 let isMeteoraSubscribed = false;
 let isRaydiumSubscribed = false;
 let isPumpfunSubscribed = false;
+
+let isMeteoraPaused = false;
+let isRaydiumPaused = false;
+let isPumpfunPaused = false;
 
 export function initDexManager() {
   primaryConnection = new Connection(RPC_URL, {
@@ -181,6 +187,8 @@ export async function subscribeToMeteora(programTypes = ["DLMM", "DAMM_V2"]) {
         async ({ logs, signature, err }) => {
           if (err) return;
 
+          if (isMeteoraPaused) return;
+
           if (!isPoolCreationTransaction(logs, programType)) return;
 
           if (hasProcessedSignature(signature)) return;
@@ -274,6 +282,8 @@ export async function subscribeToRaydium() {
         new PublicKey(RAYDIUM_AMM_PROGRAM),
         async ({ logs, signature, err }) => {
           if (err) return;
+
+          if (isRaydiumPaused) return;
 
           if (!logs.some((log) => log.includes("initialize2"))) return;
 
@@ -429,6 +439,44 @@ export function isRaydiumActive() {
 
 export function isPumpfunActive() {
   return isPumpfunSubscribed && checkPumpfunActive();
+}
+
+export async function pauseMeteora() {
+  if (!isMeteoraSubscribed || isMeteoraPaused) return;
+  isMeteoraPaused = true;
+  await logEvent("INFO", "Meteora paused - processing current coin");
+}
+
+export async function resumeMeteora() {
+  if (!isMeteoraSubscribed || !isMeteoraPaused) return;
+  isMeteoraPaused = false;
+  await logEvent("INFO", "Meteora resumed - listening for new coins");
+}
+
+export async function pauseRaydium() {
+  if (!isRaydiumSubscribed || isRaydiumPaused) return;
+  isRaydiumPaused = true;
+  await logEvent("INFO", "Raydium paused - processing current coin");
+}
+
+export async function resumeRaydium() {
+  if (!isRaydiumSubscribed || !isRaydiumPaused) return;
+  isRaydiumPaused = false;
+  await logEvent("INFO", "Raydium resumed - listening for new coins");
+}
+
+export async function pausePumpfun() {
+  if (!isPumpfunSubscribed || isPumpfunPaused) return;
+  isPumpfunPaused = true;
+  pausePumpfunInternal();
+  await logEvent("INFO", "Pumpfun paused - processing current coin");
+}
+
+export async function resumePumpfun() {
+  if (!isPumpfunSubscribed || !isPumpfunPaused) return;
+  isPumpfunPaused = false;
+  resumePumpfunInternal();
+  await logEvent("INFO", "Pumpfun resumed - listening for new coins");
 }
 
 export async function getRpcHealthStatus() {
