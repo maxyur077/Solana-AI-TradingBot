@@ -47,6 +47,10 @@ export const RAYDIUM_ENABLED = parseBoolean(
   loadEnvVariable("RAYDIUM_ENABLED", "true", false),
   true
 );
+export const PUMPFUN_ENABLED = parseBoolean(
+  loadEnvVariable("PUMPFUN_ENABLED", "true", false),
+  true
+);
 
 export const MAX_PORTFOLIO_SIZE = parseInt(
   loadEnvVariable("MAX_PORTFOLIO_SIZE"),
@@ -116,6 +120,10 @@ export const CHECK_CREATOR_HISTORY = parseBoolean(
 export const MAX_CREATOR_RUGGED_TOKENS = parseInt(
   loadEnvVariable("MAX_CREATOR_RUGGED_TOKENS", "0", false),
   10
+);
+export const CHECK_FUNDING_SOURCE = parseBoolean(
+  loadEnvVariable("CHECK_FUNDING_SOURCE", "true", false),
+  true
 );
 
 // RPC Rate limiting - delay between getParsedTransaction calls (milliseconds)
