@@ -26,36 +26,62 @@ class CoinProcessingQueue {
 
     const dexType = this.getDexType(source);
 
-    const queueItem = {
-      signature,
-      mintAddress,
-      transaction,
-      source,
-      poolAddress,
-      processor,
-      addedAt: Date.now(),
-    };
+    // PUMPFUN: Use queue system (max 1 token, sequential processing)
+    if (dexType === "pumpfun") {
+      const queueItem = {
+        signature,
+        mintAddress,
+        transaction,
+        source,
+        poolAddress,
+        processor,
+        addedAt: Date.now(),
+      };
 
-    if (this.queues[dexType] !== null) {
-      await logEvent("INFO", `Replacing ${dexType.toUpperCase()} queued coin with fresh coin`, {
-        oldMint: this.queues[dexType].mintAddress,
-        newMint: mintAddress,
-        dexType,
+      if (this.queues[dexType] !== null) {
+        await logEvent("INFO", `Replacing PUMPFUN queued coin with fresh coin`, {
+          oldMint: this.queues[dexType].mintAddress,
+          newMint: mintAddress,
+        });
+      }
+
+      this.queues[dexType] = queueItem;
+
+      await logEvent("INFO", `Added coin to PUMPFUN queue (sequential processing)`, {
+        source,
+        mintAddress,
+        portfolioSize: currentPortfolioSize,
       });
+
+      this.processDex(dexType);
     }
+    // METEORA & RAYDIUM: Process immediately in parallel (no queue)
+    else {
+      await logEvent("INFO", `Processing ${dexType.toUpperCase()} coin immediately (parallel, no queue)`, {
+        source,
+        mintAddress,
+        portfolioSize: currentPortfolioSize,
+      });
 
-    this.queues[dexType] = queueItem;
-
-    await logEvent("INFO", `Added fresh coin to ${dexType.toUpperCase()} queue (parallel processing)`, {
-      source,
-      mintAddress,
-      dexType,
-      portfolioSize: currentPortfolioSize,
-    });
-
-    this.processDex(dexType);
+      // Process immediately without queueing
+      try {
+        await processor(signature, mintAddress, transaction, source, poolAddress);
+        await logEvent("SUCCESS", `Completed ${dexType.toUpperCase()} coin processing`, {
+          source,
+          mintAddress,
+        });
+      } catch (error) {
+        await logEvent("ERROR", `Error processing ${dexType.toUpperCase()} coin`, {
+          source,
+          mintAddress,
+          error: error.message,
+        });
+      }
+    }
   }
 
+  // Process queued coins for PUMPFUN only (sequential processing)
+  // Meteora and Raydium process immediately without queueing
   async processDex(dexType) {
     if (this.processing[dexType]) {
       return;
@@ -140,15 +166,13 @@ class CoinProcessingQueue {
   }
 
   clearAllQueues() {
-    this.queues = {
-      pumpfun: null,
-      meteora: null,
-      raydium: null,
-    };
+    // Only Pumpfun uses queues now (Meteora & Raydium process immediately)
+    this.queues.pumpfun = null;
   }
 
   getTotalQueuedCoins() {
-    return Object.values(this.queues).filter(queue => queue !== null).length;
+    // Only Pumpfun uses queues (Meteora & Raydium always return 0)
+    return this.queues.pumpfun !== null ? 1 : 0;
   }
 
   getQueueStatus() {
@@ -161,16 +185,8 @@ class CoinProcessingQueue {
           source: this.queues.pumpfun.source,
           addedAt: this.queues.pumpfun.addedAt,
         } : null,
-        meteora: this.queues.meteora ? {
-          mintAddress: this.queues.meteora.mintAddress,
-          source: this.queues.meteora.source,
-          addedAt: this.queues.meteora.addedAt,
-        } : null,
-        raydium: this.queues.raydium ? {
-          mintAddress: this.queues.raydium.mintAddress,
-          source: this.queues.raydium.source,
-          addedAt: this.queues.raydium.addedAt,
-        } : null,
+        meteora: null, // No queue - processes immediately in parallel
+        raydium: null, // No queue - processes immediately in parallel
       },
     };
   }

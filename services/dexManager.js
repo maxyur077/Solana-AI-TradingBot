@@ -5,6 +5,7 @@ import {
   ADDITIONAL_RPC_URLS,
   METEORA_ENABLED,
   RAYDIUM_ENABLED,
+  PUMPFUN_ENABLED,
   getActiveDexConfig,
 } from "../config.js";
 import {
@@ -42,6 +43,7 @@ let primaryConnection = null;
 
 let isMeteoraSubscribed = false;
 let isRaydiumSubscribed = false;
+let isPumpfunSubscribed = false;
 
 let isMeteoraPaused = false;
 let isRaydiumPaused = false;
@@ -70,6 +72,9 @@ export function setMeteoraCallback(callback) {
 export function setRaydiumCallback(callback) {
   raydiumCallback = callback;
 }
+
+// Re-export Pumpfun callback setter
+export { setPumpfunCallback };
 
 function extractMintFromRaydiumTransaction(transaction) {
   try {
@@ -405,6 +410,49 @@ export async function unsubscribeFromRaydium() {
   await logEvent("SUCCESS", "Unsubscribed from all Raydium pools");
 }
 
+export async function subscribeToPumpfun() {
+  if (!PUMPFUN_ENABLED) {
+    await logEvent("INFO", "Pumpfun is disabled via config");
+    return;
+  }
+
+  if (isPumpfunSubscribed) {
+    await logEvent("INFO", "Pumpfun already subscribed");
+    return;
+  }
+
+  const connection = getPrimaryConnection();
+  const wsUrl = createWsEndpoint(RPC_URL);
+
+  await logEvent("INFO", "Subscribing to Pumpfun");
+
+  try {
+    // Initialize Pumpfun connection and subscribe
+    await initPumpfunConnection(RPC_URL);
+    await pumpfunSubscribe(connection, wsUrl);
+    isPumpfunSubscribed = true;
+    await logEvent("SUCCESS", "Subscribed to Pumpfun");
+  } catch (error) {
+    await logEvent("ERROR", "Failed to subscribe to Pumpfun", {
+      error: error.message,
+    });
+  }
+}
+
+export async function unsubscribeFromPumpfun() {
+  if (!isPumpfunSubscribed) return;
+
+  try {
+    await pumpfunUnsubscribe();
+    isPumpfunSubscribed = false;
+    await logEvent("SUCCESS", "Unsubscribed from Pumpfun");
+  } catch (error) {
+    await logEvent("WARN", "Error unsubscribing from Pumpfun", {
+      error: error.message,
+    });
+  }
+}
+
 export async function subscribeToAllDexes(meteoraTypes = ["DLMM", "DAMM_V2"]) {
   const dexConfig = getActiveDexConfig();
 
@@ -435,6 +483,11 @@ export function getSubscriptionStatus() {
       enabled: RAYDIUM_ENABLED,
       subscribed: isRaydiumSubscribed,
       subscriptions: activeRaydiumSubscriptions.size,
+    },
+    pumpfun: {
+      enabled: PUMPFUN_ENABLED,
+      subscribed: isPumpfunSubscribed,
+      status: getPumpfunSubscriptionStatus(),
     },
   };
 }

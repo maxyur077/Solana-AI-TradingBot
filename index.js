@@ -11,6 +11,7 @@ import {
   ADDITIONAL_RPC_URLS,
   METEORA_ENABLED,
   RAYDIUM_ENABLED,
+  PUMPFUN_ENABLED,
   getActiveDexConfig,
 } from "./config.js";
 import {
@@ -45,11 +46,16 @@ import {
   subscribeToMeteora,
   unsubscribeFromMeteora,
   subscribeToRaydium,
+  unsubscribeFromRaydium,
+  subscribeToPumpfun,
+  unsubscribeFromPumpfun,
   setMeteoraCallback,
   setRaydiumCallback,
+  setPumpfunCallback,
   getSubscriptionStatus,
   getRpcHealthStatus,
 } from "./services/dexManager.js";
+import { coinQueue } from "./services/coinProcessingQueue.js";
 import { shouldFilterMeteoraToken } from "./utils/helpers.js";
 import chalk from "chalk";
 import express from "express";
@@ -57,7 +63,8 @@ import express from "express";
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-async function processNewPool(
+// Internal function that performs the actual processing (vetting + buying)
+async function processNewPoolInternal(
   signature,
   mintAddress,
   transaction = null,
@@ -129,25 +136,73 @@ async function processNewPool(
   }
 }
 
+// Main entry point - routes to coinQueue which handles Pumpfun queue vs Meteora/Raydium parallel
+async function processNewPool(
+  signature,
+  mintAddress,
+  transaction = null,
+  source = "unknown",
+  poolAddress = null
+) {
+  // Use coinQueue to handle processing:
+  // - Pumpfun: Sequential with queue (max 1 at a time)
+  // - Meteora/Raydium: Immediate parallel processing
+  await coinQueue.add(
+    signature,
+    mintAddress,
+    transaction,
+    source,
+    poolAddress,
+    processNewPoolInternal
+  );
+}
+
 async function handlePortfolioFull() {
   const dexConfig = getActiveDexConfig();
 
+  await logEvent(
+    "INFO",
+    "Portfolio has 2+ coins. Unsubscribing from all DEXes to focus on monitoring."
+  );
+
+  // Unsubscribe from Meteora
   if (dexConfig.meteora && METEORA_ENABLED) {
-    await logEvent(
-      "INFO",
-      "Portfolio has 2+ coins. Unsubscribing from Meteora to focus on monitoring."
-    );
     await unsubscribeFromMeteora();
+  }
+
+  // Unsubscribe from Raydium
+  if (dexConfig.raydium && RAYDIUM_ENABLED) {
+    await unsubscribeFromRaydium();
+  }
+
+  // Unsubscribe from Pumpfun
+  if (PUMPFUN_ENABLED) {
+    await unsubscribeFromPumpfun();
   }
 }
 
 async function handlePortfolioAvailable() {
   const dexConfig = getActiveDexConfig();
 
+  await logEvent(
+    "INFO",
+    "Portfolio has space. Re-subscribing to all enabled DEXes."
+  );
+
+  // Re-subscribe to Meteora
   if (dexConfig.meteora && METEORA_ENABLED) {
-    await logEvent("INFO", "Portfolio has space. Re-subscribing to Meteora.");
     const meteoraTypes = getMeteoraTypesFromConfig();
     await subscribeToMeteora(meteoraTypes);
+  }
+
+  // Re-subscribe to Raydium
+  if (dexConfig.raydium && RAYDIUM_ENABLED) {
+    await subscribeToRaydium();
+  }
+
+  // Re-subscribe to Pumpfun
+  if (PUMPFUN_ENABLED) {
+    await subscribeToPumpfun();
   }
 }
 
@@ -171,7 +226,7 @@ async function startPoolMonitoring() {
   await logEvent("INFO", `DEX Config: ${dexConfig.mode}`);
   await logEvent(
     "INFO",
-    `METEORA_ENABLED: ${METEORA_ENABLED}, RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}`
+    `METEORA_ENABLED: ${METEORA_ENABLED}, RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}, PUMPFUN_ENABLED: ${PUMPFUN_ENABLED}`
   );
 
   initDexManager();
@@ -192,9 +247,14 @@ async function startPoolMonitoring() {
     await processNewPool(signature, mintAddress, tx, "raydium");
   });
 
+  setPumpfunCallback(async (signature, mintAddress, tx) => {
+    await processNewPool(signature, mintAddress, tx, "pumpfun");
+  });
+
   const monitorRaydium =
     dexConfig.raydium && MONITORED_DEXES.includes("raydium");
   const monitorMeteora = dexConfig.meteora;
+  const monitorPumpfun = PUMPFUN_ENABLED;
 
   switch (mode) {
     case "hybrid":
@@ -213,6 +273,10 @@ async function startPoolMonitoring() {
       if (monitorMeteora) {
         const meteoraTypes = getMeteoraTypesFromConfig();
         await subscribeToMeteora(meteoraTypes);
+      }
+
+      if (monitorPumpfun) {
+        await subscribeToPumpfun();
       }
       break;
 
@@ -240,6 +304,10 @@ async function startPoolMonitoring() {
       if (monitorMeteora) {
         const meteoraTypes = getMeteoraTypesFromConfig();
         await subscribeToMeteora(meteoraTypes);
+      }
+
+      if (monitorPumpfun) {
+        await subscribeToPumpfun();
       }
       break;
   }
@@ -361,6 +429,7 @@ async function main() {
   console.log(chalk.cyan(`   DEX Mode: ${dexConfig.mode}`));
   console.log(chalk.cyan(`   METEORA_ENABLED: ${METEORA_ENABLED}`));
   console.log(chalk.cyan(`   RAYDIUM_ENABLED: ${RAYDIUM_ENABLED}`));
+  console.log(chalk.cyan(`   PUMPFUN_ENABLED: ${PUMPFUN_ENABLED}`));
   console.log(chalk.cyan(`   Primary RPC: ${RPC_URL.substring(0, 50)}...`));
   if (ADDITIONAL_RPC_URLS.length > 0) {
     console.log(
