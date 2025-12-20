@@ -21,6 +21,7 @@ import {
   MAX_CREATOR_RUGGED_TOKENS,
   CHECK_FUNDING_SOURCE,
   RPC_CALL_DELAY_MS,
+  MIN_CREATOR_SURVIVED_TOKENS,
 } from "../config.js";
 import { connection } from "./solanaService.js";
 import { PublicKey } from "@solana/web3.js";
@@ -122,7 +123,7 @@ async function getCreatorFromHelius(mintAddress) {
  * STRICT REQUIREMENTS (ALL must be met to PASS):
  * 1. Creator MUST have transaction history (no brand new wallets)
  * 2. Creator MUST have at least 1 previous token creation
- * 3. Creator MUST have at least 1 token that survived >10 minutes
+ * 3. Creator MUST have at least MIN_CREATOR_SURVIVED_TOKENS (default 2) tokens that survived >10 minutes
  * 4. Creator CANNOT have ANY previous quick rugs (>80% dump within 10 min)
  *
  * This function:
@@ -130,8 +131,8 @@ async function getCreatorFromHelius(mintAddress) {
  * 2. Finds all tokens the creator sold
  * 3. For each token, determines when it was created
  * 4. Checks if creator dumped >80% within 10 min of creation
- * 5. Requires at least 1 token that survived >10 min before first sell
- * 6. Flags as rugger if ANY quick rugs found OR no coins survived
+ * 5. Requires at least MIN_CREATOR_SURVIVED_TOKENS tokens that survived >10 min before first sell
+ * 6. Flags as rugger if ANY quick rugs found OR not enough coins survived
  */
 async function checkSerialRugger(creatorAddress, currentMint) {
   const CACHE_DURATION_MS = 5 * 60 * 1000; // Cache for 5 minutes
@@ -326,108 +327,30 @@ async function checkSerialRugger(creatorAddress, currentMint) {
     });
 
     // FAIL if creator has NO previous token interactions at all
-    // BUT: Check funding source first - if funded by experienced creator, allow
     if (noTokensFound) {
       await logEvent(
         "WARN",
-        `Creator has no previous token creations. Checking funding source...`,
+        `VETTING FAILED: Creator has no previous token creations`,
         {
           creator: creatorAddress.slice(0, 8) + "...",
           totalTransactions: signatures.length,
         }
       );
-
-      // Check if funding source has good token creation history
-      const fundingSourceTokenCheck = await checkFundingSourceTokenHistory(
-        creatorAddress,
-        currentMint
-      );
-
-      if (fundingSourceTokenCheck.passed) {
-        await logEvent(
-          "INFO",
-          `Creator has no token history BUT funded by experienced creator with ${fundingSourceTokenCheck.survivedTokens} survived token(s) (>7min). ALLOWING.`,
-          {
-            creator: creatorAddress.slice(0, 8) + "...",
-            fundingSource: fundingSourceTokenCheck.fundingSource,
-            fundingSourceStats: fundingSourceTokenCheck.stats,
-          }
-        );
-        // Return PASS with special flag
-        return {
-          passed: true,
-          stats: {
-            totalTokens: 0,
-            survivedTokens: 0,
-            quickRugs: 0,
-            allowedByFundingSource: true,
-            fundingSourceStats: fundingSourceTokenCheck.stats,
-          },
-        };
-      } else {
-        await logEvent(
-          "WARN",
-          `VETTING FAILED: Creator has no token creations AND funding source check failed`,
-          {
-            creator: creatorAddress.slice(0, 8) + "...",
-            reason: fundingSourceTokenCheck.reason,
-          }
-        );
-        return true; // FAIL
-      }
+      return true; // FAIL
     }
 
     // FAIL if creator has NO tokens that survived >10 minutes
-    // BUT: Check funding source first - if funded by experienced creator, allow
     if (noSurvivedCoins) {
       await logEvent(
         "WARN",
-        `Creator has ${tokenInteractions.size} token(s) but NONE survived >10 min. Checking funding source...`,
+        `VETTING FAILED: Creator has ${tokenInteractions.size} token(s) but NONE survived >10 min`,
         {
           creator: creatorAddress.slice(0, 8) + "...",
           totalTokens: tokenInteractions.size,
           quickRugs: quickRuggedTokens.length,
         }
       );
-
-      // Check if funding source has good token creation history
-      const fundingSourceTokenCheck = await checkFundingSourceTokenHistory(
-        creatorAddress,
-        currentMint
-      );
-
-      if (fundingSourceTokenCheck.passed) {
-        await logEvent(
-          "INFO",
-          `Creator's tokens didn't survive BUT funded by experienced creator with ${fundingSourceTokenCheck.survivedTokens} survived token(s) (>7min). ALLOWING.`,
-          {
-            creator: creatorAddress.slice(0, 8) + "...",
-            fundingSource: fundingSourceTokenCheck.fundingSource,
-            fundingSourceStats: fundingSourceTokenCheck.stats,
-          }
-        );
-        // Return PASS with special flag
-        return {
-          passed: true,
-          stats: {
-            totalTokens: tokenInteractions.size,
-            survivedTokens: 0,
-            quickRugs: quickRuggedTokens.length,
-            allowedByFundingSource: true,
-            fundingSourceStats: fundingSourceTokenCheck.stats,
-          },
-        };
-      } else {
-        await logEvent(
-          "WARN",
-          `VETTING FAILED: Creator has no survived tokens AND funding source check failed`,
-          {
-            creator: creatorAddress.slice(0, 8) + "...",
-            reason: fundingSourceTokenCheck.reason,
-          }
-        );
-        return true; // FAIL
-      }
+      return true; // FAIL
     }
 
     // FAIL if creator has ANY previous quick-rug (even 1)
@@ -444,23 +367,25 @@ async function checkSerialRugger(creatorAddress, currentMint) {
       return true;
     }
 
-    // REQUIRE: Creator MUST have at least 1 token that survived >10 minutes
-    if (survivedTokens.length === 0) {
+    // REQUIRE: Creator MUST have at least MIN_CREATOR_SURVIVED_TOKENS tokens that survived >10 minutes
+    if (survivedTokens.length < MIN_CREATOR_SURVIVED_TOKENS) {
       await logEvent(
         "WARN",
-        `VETTING FAILED: Creator has no tokens that survived >10 minutes`,
+        `VETTING FAILED: Creator has only ${survivedTokens.length} token(s) that survived >10 minutes (min required: ${MIN_CREATOR_SURVIVED_TOKENS})`,
         {
           creator: creatorAddress.slice(0, 8) + "...",
           totalTokens: tokenInteractions.size,
+          survivedTokens: survivedTokens.length,
+          minRequired: MIN_CREATOR_SURVIVED_TOKENS,
         }
       );
       return true;
     }
 
-    // PASS: Creator has coins that survived AND no quick rugs
+    // PASS: Creator has enough coins that survived AND no quick rugs
     await logEvent(
       "INFO",
-      `Creator check PASSED: ${survivedTokens.length} token(s) survived >10 min`,
+      `Creator check PASSED: ${survivedTokens.length} token(s) survived >10 min (min required: ${MIN_CREATOR_SURVIVED_TOKENS})`,
       {
         creator: creatorAddress.slice(0, 8) + "...",
         survivedTokens,
@@ -1229,553 +1154,6 @@ async function checkBundledCreation(mintAddress) {
 }
 
 /**
- * CHECK: Funding Source Token History (Mentorship/Legitimacy Check)
- *
- * This function is called when a creator has NO token creation history.
- * Instead of immediately failing, we check if they were funded by an experienced creator.
- *
- * USE CASE: Established creators funding new team members
- *
- * LOGIC:
- * 1. Find who initially funded this creator wallet (first SOL transfer)
- * 2. Check if funding source has created tokens before
- * 3. Check if funding source has tokens that survived >7 minutes
- * 4. PASS if funding source has legitimate token history
- * 5. FAIL if funding source has no tokens OR no survived tokens
- */
-async function checkFundingSourceTokenHistory(creatorAddress, currentMint) {
-  const SURVIVAL_WINDOW_SECONDS = 420; // 7 minutes - stricter than creator check
-  const MIN_FUNDING_AMOUNT = 0.01; // Minimum 0.01 SOL to count as funding
-
-  try {
-    const creatorPubKey = new PublicKey(creatorAddress);
-
-    // Get creator's transaction history (oldest first to find initial funding)
-    const signatures = await connection.getSignaturesForAddress(creatorPubKey, {
-      limit: 100,
-    });
-
-    if (!signatures || signatures.length === 0) {
-      return {
-        passed: false,
-        reason: "Creator has no transaction history",
-      };
-    }
-
-    // Reverse to get oldest transactions first
-    const oldestTransactions = signatures.reverse();
-
-    let fundingSource = null;
-    let fundingAmount = 0;
-
-    // Find the first significant SOL transfer that funded this wallet
-    for (const sig of oldestTransactions.slice(0, 20)) {
-      try {
-        const tx = await connection.getParsedTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (RPC_CALL_DELAY_MS > 0) {
-          await sleep(RPC_CALL_DELAY_MS);
-        }
-
-        if (!tx || !tx.meta) continue;
-
-        // Check SOL balance changes
-        const preBalance =
-          tx.meta.preBalances?.[
-            tx.transaction.message.accountKeys.findIndex(
-              (key) => key.pubkey.toString() === creatorAddress
-            )
-          ] || 0;
-        const postBalance =
-          tx.meta.postBalances?.[
-            tx.transaction.message.accountKeys.findIndex(
-              (key) => key.pubkey.toString() === creatorAddress
-            )
-          ] || 0;
-
-        const balanceChange = (postBalance - preBalance) / 1e9;
-
-        if (balanceChange >= MIN_FUNDING_AMOUNT) {
-          const accountKeys = tx.transaction.message.accountKeys;
-          const instructions = tx.transaction.message.instructions;
-
-          for (const instruction of instructions) {
-            if (
-              instruction.programId.toString() ===
-              "11111111111111111111111111111111"
-            ) {
-              const accounts = instruction.accounts;
-              if (accounts && accounts.length >= 2) {
-                const fromAccount = accountKeys[accounts[0]];
-                const toAccount = accountKeys[accounts[1]];
-
-                if (toAccount.pubkey.toString() === creatorAddress) {
-                  fundingSource = fromAccount.pubkey.toString();
-                  fundingAmount = balanceChange;
-                  break;
-                }
-              }
-            }
-          }
-
-          if (fundingSource) break;
-        }
-      } catch (txError) {
-        continue;
-      }
-    }
-
-    if (!fundingSource) {
-      return {
-        passed: false,
-        reason: "Could not determine funding source",
-      };
-    }
-
-    await logEvent(
-      "INFO",
-      `Checking funding source token history: ${fundingSource.slice(0, 8)}...`,
-      {
-        creator: creatorAddress.slice(0, 8) + "...",
-        fundingAmount: fundingAmount.toFixed(3) + " SOL",
-      }
-    );
-
-    // Now check if funding source has token creation history
-    const fundingSourcePubKey = new PublicKey(fundingSource);
-    const fundingSourceSigs = await connection.getSignaturesForAddress(
-      fundingSourcePubKey,
-      { limit: 100 }
-    );
-
-    if (!fundingSourceSigs || fundingSourceSigs.length === 0) {
-      return {
-        passed: false,
-        reason: "Funding source has no transaction history",
-      };
-    }
-
-    // Track tokens the funding source created/sold
-    const tokenInteractions = new Map();
-
-    for (const sig of fundingSourceSigs) {
-      try {
-        const tx = await connection.getParsedTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (RPC_CALL_DELAY_MS > 0) {
-          await sleep(RPC_CALL_DELAY_MS);
-        }
-
-        if (!tx || !tx.meta) continue;
-
-        const txTime = tx.blockTime || 0;
-        const preBalances = tx.meta.preTokenBalances || [];
-        const postBalances = tx.meta.postTokenBalances || [];
-
-        for (const pre of preBalances) {
-          if (pre.owner !== fundingSource) continue;
-
-          const post = postBalances.find(
-            (p) => p.owner === fundingSource && p.mint === pre.mint
-          );
-          const preAmount = parseInt(pre.uiTokenAmount?.amount || "0", 10);
-          const postAmount = post
-            ? parseInt(post.uiTokenAmount?.amount || "0", 10)
-            : 0;
-
-          if (preAmount > postAmount) {
-            const soldAmount = preAmount - postAmount;
-
-            if (!tokenInteractions.has(pre.mint)) {
-              tokenInteractions.set(pre.mint, {
-                mint: pre.mint,
-                highestBalance: preAmount,
-                totalSold: soldAmount,
-                firstSellTime: txTime,
-              });
-            } else {
-              const existing = tokenInteractions.get(pre.mint);
-              existing.totalSold += soldAmount;
-              if (preAmount > existing.highestBalance) {
-                existing.highestBalance = preAmount;
-              }
-              if (txTime < existing.firstSellTime || !existing.firstSellTime) {
-                existing.firstSellTime = txTime;
-              }
-            }
-          }
-        }
-      } catch (txError) {
-        continue;
-      }
-    }
-
-    if (tokenInteractions.size === 0) {
-      return {
-        passed: false,
-        reason: "Funding source has no token creation history",
-      };
-    }
-
-    // Check if any token survived >10 minutes
-    const survivedTokens = [];
-
-    for (const [mint, data] of tokenInteractions) {
-      if (data.highestBalance <= 0 || data.totalSold <= 0) continue;
-
-      try {
-        const mintPubKey = new PublicKey(mint);
-        const tokenSigs = await connection.getSignaturesForAddress(mintPubKey, {
-          limit: 10,
-        });
-
-        if (!tokenSigs || tokenSigs.length === 0) continue;
-
-        const tokenCreationTime = tokenSigs[tokenSigs.length - 1].blockTime || 0;
-        if (!tokenCreationTime || !data.firstSellTime) continue;
-
-        const timeBetweenCreateAndSell = data.firstSellTime - tokenCreationTime;
-
-        if (timeBetweenCreateAndSell > SURVIVAL_WINDOW_SECONDS) {
-          survivedTokens.push({
-            mint: mint.slice(0, 8) + "...",
-            survivedMinutes: (timeBetweenCreateAndSell / 60).toFixed(1),
-          });
-        }
-      } catch (mintErr) {
-        continue;
-      }
-    }
-
-    if (survivedTokens.length === 0) {
-      return {
-        passed: false,
-        reason: `Funding source has ${tokenInteractions.size} token(s) but NONE survived >7 min`,
-      };
-    }
-
-    // PASS: Funding source has legitimate token creation history
-    await logEvent(
-      "INFO",
-      `Funding source has ${survivedTokens.length} token(s) that survived >7 min`,
-      {
-        fundingSource: fundingSource.slice(0, 8) + "...",
-        survivedTokens,
-      }
-    );
-
-    return {
-      passed: true,
-      fundingSource: fundingSource.slice(0, 8) + "...",
-      survivedTokens: survivedTokens.length,
-      stats: {
-        totalTokens: tokenInteractions.size,
-        survivedTokens: survivedTokens.length,
-        avgSurvivalMins:
-          survivedTokens.length > 0
-            ? (
-                survivedTokens.reduce(
-                  (sum, t) => sum + parseFloat(t.survivedMinutes),
-                  0
-                ) / survivedTokens.length
-              ).toFixed(1)
-            : 0,
-      },
-    };
-  } catch (error) {
-    await logEvent("ERROR", "Error checking funding source token history", {
-      error: error.message,
-      creator: creatorAddress,
-    });
-    return {
-      passed: false,
-      reason: "Error checking funding source",
-    };
-  }
-}
-
-/**
- * CHECK: Funding Source is a Rugger (Burner Wallet Detection)
- *
- * Detects if creator wallet was funded by a known rugger who rugged coins < 7 minutes
- * This catches "burner wallet" schemes where ruggers:
- * 1. Create a fresh wallet (clean history)
- * 2. Fund it from their main rugger wallet
- * 3. Use the clean wallet to create tokens
- *
- * LOGIC:
- * 1. Find who initially funded this creator wallet (first SOL transfer)
- * 2. Check if funding source has rugged tokens (dumped >80% within 7 min)
- * 3. FAIL if funded by a rugger
- */
-async function checkCreatorFundingSource(creatorAddress, currentMint) {
-  if (!CHECK_FUNDING_SOURCE || !creatorAddress) {
-    return { passed: true };
-  }
-
-  const QUICK_RUG_WINDOW_SECONDS = 420; // 7 minutes - stricter than creator check
-  const MIN_DUMP_PERCENT = 80; // Must sell >80% to count as rug
-  const MIN_FUNDING_AMOUNT = 0.01; // Minimum 0.01 SOL to count as funding
-
-  try {
-    const creatorPubKey = new PublicKey(creatorAddress);
-
-    // Get creator's transaction history (oldest first to find initial funding)
-    const signatures = await connection.getSignaturesForAddress(creatorPubKey, {
-      limit: 100,
-    });
-
-    if (!signatures || signatures.length === 0) {
-      await logEvent("INFO", `Creator has no transaction history`, {
-        creator: creatorAddress.slice(0, 8) + "...",
-      });
-      return { passed: true, reason: "No history to check" };
-    }
-
-    // Reverse to get oldest transactions first
-    const oldestTransactions = signatures.reverse();
-
-    let fundingSource = null;
-    let fundingAmount = 0;
-
-    // Find the first significant SOL transfer that funded this wallet
-    for (const sig of oldestTransactions.slice(0, 20)) {
-      try {
-        const tx = await connection.getParsedTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (RPC_CALL_DELAY_MS > 0) {
-          await sleep(RPC_CALL_DELAY_MS);
-        }
-
-        if (!tx || !tx.meta) continue;
-
-        // Check SOL balance changes
-        const preBalance =
-          tx.meta.preBalances?.[
-            tx.transaction.message.accountKeys.findIndex(
-              (key) => key.pubkey.toString() === creatorAddress
-            )
-          ] || 0;
-        const postBalance =
-          tx.meta.postBalances?.[
-            tx.transaction.message.accountKeys.findIndex(
-              (key) => key.pubkey.toString() === creatorAddress
-            )
-          ] || 0;
-
-        const balanceChange = (postBalance - preBalance) / 1e9; // Convert lamports to SOL
-
-        // If creator received significant SOL, this is likely the funding transaction
-        if (balanceChange >= MIN_FUNDING_AMOUNT) {
-          // Find who sent the SOL
-          const accountKeys = tx.transaction.message.accountKeys;
-          const instructions = tx.transaction.message.instructions;
-
-          // Look for system transfer instruction
-          for (const instruction of instructions) {
-            if (
-              instruction.programId.toString() ===
-              "11111111111111111111111111111111"
-            ) {
-              // System program
-              const accounts = instruction.accounts;
-              if (accounts && accounts.length >= 2) {
-                const fromAccount = accountKeys[accounts[0]];
-                const toAccount = accountKeys[accounts[1]];
-
-                if (toAccount.pubkey.toString() === creatorAddress) {
-                  fundingSource = fromAccount.pubkey.toString();
-                  fundingAmount = balanceChange;
-                  break;
-                }
-              }
-            }
-          }
-
-          if (fundingSource) break;
-        }
-      } catch (txError) {
-        continue;
-      }
-    }
-
-    if (!fundingSource) {
-      await logEvent(
-        "INFO",
-        `Could not determine funding source for creator`,
-        {
-          creator: creatorAddress.slice(0, 8) + "...",
-        }
-      );
-      return { passed: true, reason: "Funding source not found" };
-    }
-
-    await logEvent(
-      "INFO",
-      `Creator was funded by: ${fundingSource.slice(
-        0,
-        8
-      )}... (${fundingAmount.toFixed(3)} SOL)`,
-      {
-        creator: creatorAddress.slice(0, 8) + "...",
-      }
-    );
-
-    // Now check if funding source is a rugger
-    const fundingSourcePubKey = new PublicKey(fundingSource);
-    const fundingSourceSigs = await connection.getSignaturesForAddress(
-      fundingSourcePubKey,
-      { limit: 100 }
-    );
-
-    if (!fundingSourceSigs || fundingSourceSigs.length === 0) {
-      return { passed: true, reason: "Funding source has no history" };
-    }
-
-    // Track tokens the funding source interacted with
-    const tokenInteractions = new Map();
-
-    for (const sig of fundingSourceSigs) {
-      try {
-        const tx = await connection.getParsedTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (RPC_CALL_DELAY_MS > 0) {
-          await sleep(RPC_CALL_DELAY_MS);
-        }
-
-        if (!tx || !tx.meta) continue;
-
-        const txTime = tx.blockTime || 0;
-        const preBalances = tx.meta.preTokenBalances || [];
-        const postBalances = tx.meta.postTokenBalances || [];
-
-        for (const pre of preBalances) {
-          if (pre.owner !== fundingSource) continue;
-
-          const post = postBalances.find(
-            (p) => p.owner === fundingSource && p.mint === pre.mint
-          );
-          const preAmount = parseInt(pre.uiTokenAmount?.amount || "0", 10);
-          const postAmount = post
-            ? parseInt(post.uiTokenAmount?.amount || "0", 10)
-            : 0;
-
-          if (preAmount > postAmount) {
-            const soldAmount = preAmount - postAmount;
-
-            if (!tokenInteractions.has(pre.mint)) {
-              tokenInteractions.set(pre.mint, {
-                mint: pre.mint,
-                highestBalance: preAmount,
-                totalSold: soldAmount,
-                firstSellTime: txTime,
-              });
-            } else {
-              const existing = tokenInteractions.get(pre.mint);
-              existing.totalSold += soldAmount;
-              if (preAmount > existing.highestBalance) {
-                existing.highestBalance = preAmount;
-              }
-              if (txTime < existing.firstSellTime || !existing.firstSellTime) {
-                existing.firstSellTime = txTime;
-              }
-            }
-          }
-        }
-      } catch (txError) {
-        continue;
-      }
-    }
-
-    // Check each token: did funding source rug it within 7 minutes?
-    const ruggedTokens = [];
-
-    for (const [mint, data] of tokenInteractions) {
-      if (data.highestBalance <= 0 || data.totalSold <= 0) continue;
-
-      const soldPercent = (data.totalSold / data.highestBalance) * 100;
-
-      try {
-        const mintPubKey = new PublicKey(mint);
-        const tokenSigs = await connection.getSignaturesForAddress(mintPubKey, {
-          limit: 10,
-        });
-
-        if (!tokenSigs || tokenSigs.length === 0) continue;
-
-        const tokenCreationTime = tokenSigs[tokenSigs.length - 1].blockTime || 0;
-        if (!tokenCreationTime || !data.firstSellTime) continue;
-
-        const timeBetweenCreateAndSell = data.firstSellTime - tokenCreationTime;
-
-        // Check if sold >80% within 7 minutes
-        if (
-          soldPercent >= MIN_DUMP_PERCENT &&
-          timeBetweenCreateAndSell <= QUICK_RUG_WINDOW_SECONDS
-        ) {
-          ruggedTokens.push({
-            mint: mint.slice(0, 8) + "...",
-            soldPercent: soldPercent.toFixed(1) + "%",
-            ruggedAfterMinutes: (timeBetweenCreateAndSell / 60).toFixed(1),
-          });
-        }
-      } catch (mintErr) {
-        continue;
-      }
-    }
-
-    if (ruggedTokens.length > 0) {
-      await logEvent(
-        "WARN",
-        `VETTING FAILED: Creator funded by RUGGER! Funding source rugged ${ruggedTokens.length} token(s) within 7 min`,
-        {
-          creator: creatorAddress.slice(0, 8) + "...",
-          fundingSource: fundingSource.slice(0, 8) + "...",
-          fundingAmount: fundingAmount.toFixed(3) + " SOL",
-          ruggedTokens,
-        }
-      );
-      return {
-        passed: false,
-        reason: `Creator funded by rugger (${ruggedTokens.length} tokens rugged <7min)`,
-        fundingSource: fundingSource.slice(0, 8) + "...",
-        ruggedTokens,
-      };
-    }
-
-    await logEvent(
-      "INFO",
-      `Funding source check PASSED: No quick rugs detected`,
-      {
-        creator: creatorAddress.slice(0, 8) + "...",
-        fundingSource: fundingSource.slice(0, 8) + "...",
-        tokensChecked: tokenInteractions.size,
-      }
-    );
-
-    return {
-      passed: true,
-      fundingSource: fundingSource.slice(0, 8) + "...",
-      tokensChecked: tokenInteractions.size,
-    };
-  } catch (error) {
-    await logEvent("ERROR", "Error checking creator funding source", {
-      error: error.message,
-      creator: creatorAddress,
-    });
-    return { passed: true }; // Don't fail on error
-  }
-}
-
-/**
  * CHECK: Creator token history via Helius
  * Checks if the creator has deployed tokens before that got rugged or have 0 liquidity
  */
@@ -2172,26 +1550,6 @@ export async function checkRug(mintAddress) {
             mint: mintAddress,
             creator: creatorAddress,
             ruggedTokens: creatorHistoryCheck.ruggedTokens,
-          }
-        );
-        return null;
-      }
-
-      // NEW CHECK 4: Funding source is a rugger? (Burner wallet detection)
-      // Only run if creator history passed (has at least 1 token that survived 10+ min)
-      const fundingSourceCheck = await checkCreatorFundingSource(
-        creatorAddress,
-        mintAddress
-      );
-      if (!fundingSourceCheck.passed) {
-        await logEvent(
-          "WARN",
-          `Vetting FAILED: ${fundingSourceCheck.reason}`,
-          {
-            mint: mintAddress,
-            creator: creatorAddress,
-            fundingSource: fundingSourceCheck.fundingSource,
-            ruggedTokens: fundingSourceCheck.ruggedTokens,
           }
         );
         return null;

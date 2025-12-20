@@ -125,6 +125,10 @@ export const CHECK_FUNDING_SOURCE = parseBoolean(
   loadEnvVariable("CHECK_FUNDING_SOURCE", "true", false),
   true
 );
+export const MIN_CREATOR_SURVIVED_TOKENS = parseInt(
+  loadEnvVariable("MIN_CREATOR_SURVIVED_TOKENS", "2", false),
+  10
+);
 
 // RPC Rate limiting - delay between getParsedTransaction calls (milliseconds)
 export const RPC_CALL_DELAY_MS = parseInt(
